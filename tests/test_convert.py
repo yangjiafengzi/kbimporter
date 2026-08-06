@@ -131,6 +131,34 @@ def test_retry_engines_mineru_fallback(cfg: Config, monkeypatch):
     assert row is not None and row[0] == "ocr_md"
 
 
+def test_retry_engines_marker_single_success(cfg: Config, monkeypatch):
+    lost_dir = cfg.ocr_work_dir / "lost"
+    lost_pdf = lost_dir / "项目文献" / "p" / "doc.pdf"
+    lost_pdf.parent.mkdir(parents=True, exist_ok=True)
+    lost_pdf.write_bytes(b"pdf")
+    dest_dir = cfg.scan_dir / "项目文献" / "p"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    def fake_run(cmd, timeout):
+        out_dir = Path(cmd[cmd.index("--output_dir") + 1])
+        md = out_dir / "doc" / "doc.md"
+        md.parent.mkdir(parents=True, exist_ok=True)
+        md.write_text("# marker md", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(convert, "run_with_kill", fake_run)
+    cfg.engines = ["marker"]
+    failed: list[str] = []
+    success = convert.process_retry_engines(
+        lost_dir, cfg.scan_dir, cfg, dry_run=False, failed_files=failed,
+        log=convert.logging.getLogger("t"),
+    )
+    assert success == 1
+    assert (dest_dir / "doc.md").read_text(encoding="utf-8") == "# marker md"
+    assert not lost_pdf.exists()
+    assert not list(lost_dir.rglob("retry_*"))
+
+
 def test_retry_engines_cloud_fallback(cfg: Config, monkeypatch):
     d = cfg.project_root / "p"
     d.mkdir(parents=True)

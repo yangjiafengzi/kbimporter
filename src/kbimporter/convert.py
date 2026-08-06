@@ -328,6 +328,7 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
         base_name = pdf_path.stem
         dest_md = original_dir / f"{base_name}.md"
         produced_md: Path | None = None
+        cleanup_dirs: list[Path] = []
         log.info(f"  [{idx}/{len(items)}] {pdf_path.name}")
         for engine in cfg.engines:
             if engine == "marker":
@@ -336,6 +337,7 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
                     continue
                 tmp_out = lost_dir / f"retry_{idx}"
                 tmp_out.mkdir(parents=True, exist_ok=True)
+                cleanup_dirs.append(tmp_out)
                 cmd = [
                     _resolve_exe(cfg.marker_single_cmd, "ocr_env"), str(pdf_path),
                     "--output_dir", str(tmp_out),
@@ -348,9 +350,6 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
                         produced_md = md_path
                 except Exception as e:
                     log.warning(f"    marker_single 失败: {e}")
-                finally:
-                    if tmp_out.is_dir():
-                        shutil.rmtree(str(tmp_out), ignore_errors=True)
             elif engine == "mineru":
                 produced_md = _run_mineru_single(pdf_path, cfg, log)
             elif engine == "cloud":
@@ -383,6 +382,9 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
         else:
             log.warning(f"    全部引擎失败: {pdf_path.name}")
             failed_files.append(str(dir_rel / pdf_path.name))
+        for d in cleanup_dirs:
+            if d.is_dir():
+                shutil.rmtree(str(d), ignore_errors=True)
     log.info(f"[阶段3] 重试完成: {success}/{len(items)} 成功")
     return success
 
