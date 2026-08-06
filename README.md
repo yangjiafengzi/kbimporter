@@ -1,5 +1,10 @@
 # kbimporter — 知识库导入程序
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](pyproject.toml)
+
+GitHub: [yangjiafengzi/kbimporter](https://github.com/yangjiafengzi/kbimporter)
+
 把 Zotero 文献、项目文献、田野调查笔记统一整理为 Markdown，经双层切片写入 Milvus，
 并提供增量导入、OCR 转换、去重清理与检索。向量化在 Milvus 服务端完成，本地无需 GPU
 也能建库（OCR 环节是否要 GPU 另算）。
@@ -148,7 +153,7 @@ pip install "kbimporter-0.2.0-py3-none-any.whl[all]"
 从源码安装（推荐，含 `kb setup` 引导）：
 
 ```bash
-git clone <仓库地址>
+git clone https://github.com/yangjiafengzi/kbimporter.git
 cd 知识库导入程序
 python -m venv .venv
 # Windows
