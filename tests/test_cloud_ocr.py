@@ -184,6 +184,24 @@ def test_paddle_split_job_merges_parts(cfg, monkeypatch):
     assert calls == ["a.pdf", "b.pdf", "c.pdf"]
 
 
+def test_paddle_split_job_reuses_completed_checkpoint(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="paddle")
+    state_dir = cloud_ocr._state_dir(cfg, "big.pdf")
+    cloud_ocr._save_part(state_dir, "0000-0001", "page1")
+    cloud_ocr._save_part(state_dir, "0001-0002", "page2")
+    cloud_ocr._save_checkpoint_paddle(
+        state_dir, {"job_id": "x", "total_pages": 2, "done_pages": [0, 1]}
+    )
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 2)
+
+    def no_split(*a):
+        raise AssertionError("不应拆分已完成的缓存")
+
+    monkeypatch.setattr(cloud_ocr, "_split_pdf", no_split)
+    text = cloud_ocr._paddle_ocr_split_job(cfg, "big.pdf", logging.getLogger("t"))
+    assert text == "page1\n\npage2"
+
+
 def test_paddle_job_resets_checkpoint_when_pages_change(cfg, monkeypatch):
     _enable_cloud(cfg, provider="paddle")
     monkeypatch.setenv("PADDLE_OCR_API_KEY", "token")

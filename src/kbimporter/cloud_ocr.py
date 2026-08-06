@@ -362,6 +362,12 @@ def _paddle_ocr_split_job(cfg: Config, pdf_path: str | Path,
     """PaddleOCR 云端任务：超过单任务页数上限时自动拆分，识别后按页序合并。"""
     pdl = cfg.cloud_ocr.paddle
     total = pdf_page_count(pdf_path)
+    main_state = _state_dir(cfg, pdf_path)
+    cp = _load_checkpoint(main_state) or {}
+    if cp.get("kind") == "paddle" and cp.get("total_pages") == total and \
+            len(cp.get("done_pages", [])) >= total:
+        log.info("PaddleOCR 任务已完成，直接合并缓存")
+        return _merge_parts(main_state, total, 1)
     if total <= pdl.max_pages_per_task:
         return _paddle_ocr_job(cfg, pdf_path, log)
 
@@ -369,7 +375,7 @@ def _paddle_ocr_split_job(cfg: Config, pdf_path: str | Path,
         f"PaddleOCR 单任务建议不超过 {pdl.max_pages_per_task} 页；"
         f"当前 {total} 页，将拆分为多个子任务，识别完成后自动合并"
     )
-    split_dir = _state_dir(cfg, pdf_path) / "split"
+    split_dir = main_state / "split"
     ensure_dir(split_dir)
     parts = _split_pdf(pdf_path, split_dir, pdl.max_pages_per_task)
     texts: list[str] = []
