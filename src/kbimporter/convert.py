@@ -69,6 +69,21 @@ def _force_rmtree(path: Path):
             pass
 
 
+def _resolve_exe(cmd: str, *env_hints: str) -> str:
+    """解析外部引擎可执行文件：绝对路径直接返回，否则查 PATH，再查 conda env。"""
+    if os.path.isabs(cmd) or "/" in cmd or "\\" in cmd:
+        return cmd
+    found = shutil.which(cmd)
+    if found:
+        return found
+    from kbimporter.doctor import _env_exe
+    for env in env_hints:
+        resolved = _env_exe(env, cmd)
+        if resolved:
+            return resolved
+    return cmd
+
+
 def run_with_kill(cmd: list[str], timeout: int) -> int:
     popen_kwargs: dict = {}
     if os.name == "nt":
@@ -112,7 +127,7 @@ def find_files(scan_dir: Path, cfg: Config) -> tuple[list[Path], list[Path]]:
 
 def build_marker_cmd(input_dir: Path, output_dir: Path, cfg: Config) -> list[str]:
     cmd = [
-        cfg.marker_cmd, str(input_dir),
+        _resolve_exe(cfg.marker_cmd, "ocr_env"), str(input_dir),
         "--output_dir", str(output_dir),
         "--output_format", "markdown",
         "--workers", str(cfg.marker_workers),
@@ -162,7 +177,7 @@ def process_markitdown(files: list[Path], scan_dir: Path, cfg: Config,
             log.info(f"  -> [模拟] markitdown {fpath.name} -> {dest_md}")
             success += 1
             continue
-        cmd = [cfg.markitdown_cmd, str(fpath), "-o", str(tmp_md)]
+        cmd = [_resolve_exe(cfg.markitdown_cmd), str(fpath), "-o", str(tmp_md)]
         log.debug(f"  执行: {' '.join(cmd)}")
         try:
             ensure_dir(tmp_md.parent)
@@ -244,7 +259,7 @@ def _run_mineru_single(pdf_path: Path, cfg: Config,
     env = os.environ.copy()
     env["MINERU_MODEL_SOURCE"] = cfg.mineru_model_source
     cmd = [
-        cfg.mineru_cmd, "-p", str(pdf_path),
+        _resolve_exe(cfg.mineru_cmd, "mineru_env"), "-p", str(pdf_path),
         "-o", str(out_dir),
         "-b", cfg.mineru_backend,
         "-m", cfg.mineru_method,
@@ -319,7 +334,7 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
                 tmp_out = lost_dir / f"retry_{idx}"
                 tmp_out.mkdir(parents=True, exist_ok=True)
                 cmd = [
-                    cfg.marker_single_cmd, str(pdf_path),
+                    _resolve_exe(cfg.marker_single_cmd, "ocr_env"), str(pdf_path),
                     "--output_dir", str(tmp_out),
                     "--output_format", "markdown",
                 ]

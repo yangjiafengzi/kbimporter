@@ -178,3 +178,29 @@ def test_run_with_kill_timeout():
         convert.run_with_kill(
             [sys.executable, "-c", "import time; time.sleep(10)"], timeout=1
         )
+
+
+def test_resolve_exe_uses_path(monkeypatch):
+    monkeypatch.setattr(convert.shutil, "which", lambda name: r"C:\tools\marker.exe")
+    assert convert._resolve_exe("marker", "ocr_env") == r"C:\tools\marker.exe"
+
+
+def test_resolve_exe_falls_back_to_env(monkeypatch):
+    monkeypatch.setattr(convert.shutil, "which", lambda name: None)
+    monkeypatch.setattr(
+        "kbimporter.doctor._env_exe",
+        lambda env, exe: (
+            r"C:\fake\envs\ocr_env\Scripts\marker.exe" if env == "ocr_env" else None
+        ),
+    )
+    assert convert._resolve_exe("marker", "ocr_env") == \
+        r"C:\fake\envs\ocr_env\Scripts\marker.exe"
+    assert convert._resolve_exe("ghost") == "ghost"
+
+
+def test_build_marker_cmd_uses_resolved_exe(cfg, monkeypatch):
+    monkeypatch.setattr(
+        convert, "_resolve_exe", lambda cmd, *envs: r"C:\resolved\marker.exe"
+    )
+    cmd = convert.build_marker_cmd(Path("in"), Path("out"), cfg)
+    assert cmd[0] == r"C:\resolved\marker.exe"
