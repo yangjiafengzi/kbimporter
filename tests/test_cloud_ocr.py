@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import pytest
+
+from kbimporter import cloud_ocr
+
+
+def _enable_cloud(cfg, provider="openai"):
+    cfg.cloud_ocr.enabled = True
+    cfg.cloud_ocr.provider = provider
+    cfg.cloud_ocr.state_dir = cfg.state_dir / "cloud_ocr"
+    return cfg
+
+
+def test_disabled_raises(cfg):
+    with pytest.raises(RuntimeError, match="未启用"):
+        cloud_ocr.ocr_pdf_cloud(cfg, "x.pdf")
+
+
+def test_dry_run_reports_without_api(cfg, monkeypatch):
+    _enable_cloud(cfg)
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 5)
+    monkeypatch.setattr(cloud_ocr, "render_page", lambda p, i, s: b"png")
+    monkeypatch.setattr(cloud_ocr, "_openai_batch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应调用 API")))
+    result = cloud_ocr.ocr_pdf_cloud(cfg, "x.pdf", dry_run=True)
+    assert result is None
+
+
+def test_openai_provider_with_checkpoint_resume(cfg, monkeypatch):
+    _enable_cloud(cfg)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test")
+    calls = []
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 3)
+    monkeypatch.setattr(cloud_ocr, "render_page", lambda p, i, s: f"img{i}".encode())
+
+    def fake_batch(cfg_, api_key, images, log):
+        calls.append(len(images))
+        return f"第{len(calls)}批文本"
+
+    monkeypatch.setattr(cloud_ocr, "_openai_batch", fake_batch)
+    text = cloud_ocr.ocr_pdf_cloud(cfg, "doc.pdf")
+    assert "第1批文本" in text and "第3批文本" in text
+    assert len(calls) == 3
+
+    # 再次运行：断点已存在，不应再调用 API
+    text2 = cloud_ocr.ocr_pdf_cloud(cfg, "doc.pdf")
+    assert text2 == text
+    assert len(calls) == 3
+
+
+def test_baidu_provider(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="baidu")
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 2)
+    monkeypatch.setattr(cloud_ocr, "render_page", lambda p, i, s: b"img")
+    monkeypatch.setattr(cloud_ocr, "_baidu_token", lambda c, l: "token")
+    monkeypatch.setattr(cloud_ocr, "_baidu_page", lambda c, t, img, l: "百度识别文本")
+    text = cloud_ocr.ocr_pdf_cloud(cfg, "doc.pdf")
+    assert "百度识别文本" in text
+
+
+def test_paddle_provider_job_flow_with_resume(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="paddle")
+    monkeypatch.setenv("PADDLE_OCR_API_KEY", "token")
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 2)
+    calls = {"submit": 0}
+
+    def fake_submit(cfg_, pdf, log):
+        calls["submit"] += 1
+        return "job1"
+
+    def fake_poll(cfg_, job_id, log):
+        return {"resultUrl": {"jsonUrl": "http://example.com/result.jsonl"}}
+
+    def fake_download(cfg_, data, log):
+        return ["第一页内容", "第二页内容"]
+
+    monkeypatch.setattr(cloud_ocr, "_paddle_submit", fake_submit)
+    monkeypatch.setattr(cloud_ocr, "_paddle_poll", fake_poll)
+    monkeypatch.setattr(cloud_ocr, "_paddle_download_pages", fake_download)
+
+    text = cloud_ocr.ocr_pdf_cloud(cfg, "doc.pdf")
+    assert "第一页内容" in text and "第二页内容" in text
+    text2 = cloud_ocr.ocr_pdf_cloud(cfg, "doc.pdf")
+    assert text2 == text
+    assert calls["submit"] == 1  # 断点续传：不重复提交任务
+
+
+def test_baidu_token_requires_keys(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="baidu")
+    monkeypatch.delenv("BAIDU_OCR_API_KEY", raising=False)
+    monkeypatch.delenv("BAIDU_OCR_SECRET_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="百度 OCR 缺少密钥"):
+        cloud_ocr._baidu_token(cfg, logging.getLogger("t"))
+
+
+def test_write_cloud_ocr_md(cfg, monkeypatch, tmp_path: Path):
+    _enable_cloud(cfg)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test")
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 1)
+    monkeypatch.setattr(cloud_ocr, "render_page", lambda p, i, s: b"img")
+    monkeypatch.setattr(cloud_ocr, "_openai_batch", lambda *a, **k: "结果文本")
+    dest = tmp_path / "out.md"
+    assert cloud_ocr.write_cloud_ocr_md(cfg, "doc.pdf", dest) is True
+    assert dest.read_text(encoding="utf-8") == "结果文本"

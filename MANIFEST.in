@@ -1,0 +1,7 @@
+include README.md
+include AGENTS.md
+include LICENSE
+include kb_config.example.toml
+recursive-include src/kbimporter *.py
+recursive-include agents *.md
+recursive-include docs *.md

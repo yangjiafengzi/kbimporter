@@ -1,0 +1,117 @@
+# 知识库导入程序配置文件
+# 复制为 kb_config.toml 后按需修改；所有密钥只从环境变量读取。
+
+[paths]
+# 知识库根目录（必填；也可用环境变量 KB_ROOT 覆盖）
+kb_root = ""
+# 以下路径留空时自动从 kb_root 推导；需要自定义时才填写
+library_dir = ""        # 默认: <kb_root>/zotero文献库/library
+project_root = ""       # 默认: <kb_root>/项目文献
+fieldwork_root = ""     # 默认: <kb_root>/田野调查笔记
+zotero_storage = ""     # Zotero 附件目录，默认: <用户目录>/Zotero/storage
+state_dir = ""          # 增量状态目录，默认: <kb_root>/.kb
+state_db = ""           # 增量状态库文件；默认: <state_dir>/state.db。
+                        # 若要复用旧版 0向量化/import_state.db，直接把该文件路径填在这里
+trash_dir = ""          # 回收/备份目录，默认: <state_dir>/trash
+scan_dir = ""           # 文档转换扫描目录，默认: <kb_root>
+ocr_work_dir = ""       # 转换工作目录，默认: <kb_root>/ocr/_convert_work
+ocr_log_file = ""       # 转换日志（追加模式），默认: <state_dir>/logs/convert.log
+
+[milvus]
+host = "localhost"
+port = "19530"
+embedding_provider = "dashscope"
+embedding_model = "text-embedding-v3"
+embedding_dim = 1024
+hnsw_m = 16
+hnsw_ef_construction = 256
+batch_size = 30
+
+[chunk]
+coarse_size = 8192
+coarse_overlap = 1024
+fine_size = 1024
+fine_overlap = 256
+separators = ["\n\n", "\n", "。", "！", "？", "；", "，", " "]
+
+[converter]
+marker_cmd = "marker"
+marker_single_cmd = "marker_single"
+markitdown_cmd = "markitdown"
+marker_workers = 1
+max_per_batch = 20
+timeout_per_pdf = 900
+timeout_retry_pdf = 1800
+enable_llm = false
+llm_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+llm_model = "qwen3.5-plus"
+# 转换成功后的原文件处理：trash（移入回收目录，推荐）/ delete / keep
+after_convert = "trash"
+# 已存在同名 .md 时跳过转换，避免重复 OCR
+skip_existing_md = true
+# PDF 转换引擎回退顺序：marker -> mineru -> cloud（cloud 需在 [cloud_ocr] 显式开启）
+engines = ["marker", "mineru", "cloud"]
+# MinerU（本地模型，适合有显卡的机器）
+mineru_cmd = "mineru"
+mineru_backend = "hybrid-engine"
+mineru_method = "ocr"
+mineru_model_source = "auto"   # auto / local / modelscope
+skip_dirs = ["_convert_work", "ocr", "__pycache__", ".git", "0向量化", ".kb"]
+skip_exts = [".pdf", ".md", ".json", ".py", ".log"]
+markitdown_exts = [".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls", ".epub", ".html", ".htm", ".csv", ".xml", ".txt", ".rtf", ".odt"]
+
+[sync]
+target_extensions = [".pdf", ".epub"]
+
+[dedupe]
+supported_extensions = [".pdf", ".epub"]
+# 已存在同名 MD 时，是否用 Zotero 库中的 MD 替换：
+#   ocr_only = 仅替换本程序记录的 OCR 产物（推荐）
+#   always   = 只要内容不同就替换（旧文件进回收目录）
+#   never    = 永不替换，仅跳过
+replace_existing_md = "ocr_only"
+
+[cloud_ocr]
+# 风险提示：云端 OCR 会调用付费 API（OpenAI 兼容接口按 token/图片计费，
+# 百度 OCR 按调用次数计费），且会把文档图片发送到第三方服务。
+# 必须在配置中显式 enabled = true 才会启用，默认关闭。
+enabled = false
+provider = "paddle"   # paddle（首选，PaddleOCR 云 API）/ baidu（百度智能云）/ openai（通用兼容接口）
+state_dir = ""        # 断点续传状态目录，默认: <state_dir>/cloud_ocr
+
+[cloud_ocr.paddle]
+# PaddleOCR 云端异步任务：整份 PDF 提交，服务端按页提取 Markdown
+job_url = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+model = "PaddleOCR-VL-1.6"
+api_key_env = "PADDLE_OCR_API_KEY"
+timeout = 120
+max_retries = 3
+poll_interval = 5
+max_poll_seconds = 7200
+use_doc_orientation_classify = false
+use_doc_unwarping = false
+use_chart_recognition = false
+
+[cloud_ocr.openai]
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+model = "qwen3-vl-plus"
+api_key_env = "DASHSCOPE_API_KEY"
+page_batch_size = 1   # 每个请求最多包含的页数（>1 可减少请求次数，OpenAI 兼容接口）
+max_workers = 4
+scale_factor = 3.0    # PDF 转图片缩放倍数
+timeout = 120
+max_retries = 3
+prompt = "你是一位专业的 OCR 识别专家。请识别图片中的全部文字，严格保持段落和排版结构，输出 Markdown 文本；忽略页眉、页脚、页码；模糊之处标注[?]；不要输出任何解释。"
+
+[cloud_ocr.baidu]
+token_url = "https://aip.baidubce.com/oauth/2.0/token"
+accurate_url = "https://aip.baidubce.com/rest/2.0/ocr/v1/accurate_basic"
+api_key_env = "BAIDU_OCR_API_KEY"
+secret_key_env = "BAIDU_OCR_SECRET_KEY"
+language_type = "CHN_ENG"
+detect_direction = true
+paragraph = true
+scale_factor = 2.0
+max_workers = 4
+timeout = 60
+max_retries = 3
