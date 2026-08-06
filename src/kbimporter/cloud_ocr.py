@@ -199,16 +199,31 @@ def _paddle_submit(cfg: Config, pdf_path: str | Path,
         "model": pdl.model,
         "optionalPayload": json.dumps(optional_payload),
     }
-    with open(pdf_path, "rb") as f:
-        files = {"file": (Path(pdf_path).name, f)}
-        resp = requests.post(
-            pdl.job_url, headers=headers, data=data, files=files, timeout=pdl.timeout
-        )
-    if resp.status_code != 200:
-        raise RuntimeError(f"PaddleOCR 提交失败: {resp.status_code} {resp.text[:300]}")
-    job_id = resp.json()["data"]["jobId"]
-    log.info(f"PaddleOCR 云任务已提交: jobId={job_id}")
-    return job_id
+    last_err: Exception | None = None
+    for attempt in range(1, pdl.max_retries + 1):
+        try:
+            with open(pdf_path, "rb") as f:
+                files = {"file": (Path(pdf_path).name, f)}
+                resp = requests.post(
+                    pdl.job_url, headers=headers, data=data, files=files,
+                    timeout=pdl.timeout,
+                )
+            if resp.status_code == 200:
+                job_id = resp.json()["data"]["jobId"]
+                log.info(f"PaddleOCR 云任务已提交: jobId={job_id}")
+                return job_id
+            last_err = RuntimeError(
+                f"PaddleOCR 提交失败: {resp.status_code} {resp.text[:300]}"
+            )
+            log.warning(f"  PaddleOCR 提交第 {attempt} 次失败: {resp.status_code}")
+        except Exception as e:
+            last_err = e
+            log.warning(f"  PaddleOCR 提交第 {attempt} 次异常: {e}")
+        if attempt < pdl.max_retries:
+            time.sleep(min(2 ** attempt, 30))
+    raise RuntimeError(
+        f"PaddleOCR 提交失败（已重试 {pdl.max_retries} 次）: {last_err}"
+    )
 
 
 def _paddle_poll(cfg: Config, job_id: str, log: logging.Logger) -> dict:
@@ -267,11 +282,26 @@ def _paddle_ocr_job(cfg: Config, pdf_path: str | Path,
         log.info("PaddleOCR 任务已完成，直接合并缓存")
         return _merge_parts(state_dir, cp["total_pages"], 1)
 
+    pdl = cfg.cloud_ocr.paddle
+    last_err: Exception | None = None
     job_id = cp.get("job_id")
-    if not job_id:
-        job_id = _paddle_submit(cfg, pdf_path, log)
-        _save_checkpoint_paddle(state_dir, {"job_id": job_id, "done_pages": []})
-    data = _paddle_poll(cfg, job_id, log)
+    for attempt in range(1, pdl.max_retries + 1):
+        if job_id is None or attempt > 1:
+            job_id = _paddle_submit(cfg, pdf_path, log)
+            _save_checkpoint_paddle(state_dir, {"job_id": job_id, "done_pages": []})
+        try:
+            data = _paddle_poll(cfg, job_id, log)
+            break
+        except RuntimeError as e:
+            last_err = e
+            log.warning(f"  PaddleOCR 任务第 {attempt} 次失败: {e}")
+            job_id = None
+    else:
+        raise RuntimeError(
+            f"PaddleOCR 云任务失败（已重试 {pdl.max_retries} 次）: {last_err}。"
+            "可能原因：PDF 加密/损坏、PaddleOCR 服务繁忙、API Key 失效。"
+            "可稍后重试，或换用其他 OCR 引擎（kb ocr mode local）"
+        )
     pages = _paddle_download_pages(cfg, data, log)
     total = len(pages)
     done_pages = set(cp.get("done_pages", []))

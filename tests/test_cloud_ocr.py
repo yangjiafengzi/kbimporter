@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import requests
 from pathlib import Path
 
 import pytest
@@ -86,6 +87,59 @@ def test_paddle_provider_job_flow_with_resume(cfg, monkeypatch):
     text2 = cloud_ocr.ocr_pdf_cloud(cfg, "doc.pdf")
     assert text2 == text
     assert calls["submit"] == 1  # 断点续传：不重复提交任务
+
+
+def test_paddle_submit_retries_on_500(cfg, monkeypatch, tmp_path: Path):
+    _enable_cloud(cfg, provider="paddle")
+    monkeypatch.setenv("PADDLE_OCR_API_KEY", "token")
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"pdf")
+    calls = {"n": 0}
+
+    class Resp:
+        status_code = 500
+        text = "server error"
+
+        def json(self):
+            raise AssertionError("不应解析 JSON")
+
+    def fake_post(*a, **k):
+        calls["n"] += 1
+        return Resp()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    with pytest.raises(RuntimeError, match="已重试"):
+        cloud_ocr._paddle_submit(cfg, pdf, logging.getLogger("t"))
+    assert calls["n"] == 3  # 默认 max_retries=3
+
+
+def test_paddle_provider_retries_failed_job(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="paddle")
+    monkeypatch.setenv("PADDLE_OCR_API_KEY", "token")
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 2)
+    calls = {"submit": 0, "poll": 0}
+
+    def fake_submit(cfg_, pdf, log):
+        calls["submit"] += 1
+        return f"job{calls['submit']}"
+
+    def fake_poll(cfg_, job_id, log):
+        calls["poll"] += 1
+        if calls["poll"] == 1:
+            raise RuntimeError("PaddleOCR 云任务失败: OCR服务请求失败，状态码 500")
+        return {"resultUrl": {"jsonUrl": "http://example.com/result.jsonl"}}
+
+    def fake_download(cfg_, data, log):
+        return ["第一页内容", "第二页内容"]
+
+    monkeypatch.setattr(cloud_ocr, "_paddle_submit", fake_submit)
+    monkeypatch.setattr(cloud_ocr, "_paddle_poll", fake_poll)
+    monkeypatch.setattr(cloud_ocr, "_paddle_download_pages", fake_download)
+
+    text = cloud_ocr.ocr_pdf_cloud(cfg, "doc.pdf")
+    assert "第一页内容" in text and "第二页内容" in text
+    assert calls["submit"] == 2
+    assert calls["poll"] == 2
 
 
 def test_baidu_token_requires_keys(cfg, monkeypatch):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import types
 from pathlib import Path
 
 from kbimporter import convert
@@ -57,6 +58,28 @@ def test_process_markitdown_dry_run_plans_only(cfg: Config):
     )
     assert count == 1
     assert not (d / "a.md").exists()
+
+
+def test_process_markitdown_creates_output_dir(cfg: Config, monkeypatch):
+    d = cfg.scan_dir / "x"
+    d.mkdir(parents=True)
+    f = d / "a.docx"
+    f.write_bytes(b"docx")
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=120):
+        out = Path(cmd[cmd.index("-o") + 1])
+        out.write_text("# md", encoding="utf-8")  # 不创建父目录，由被测代码保证
+        return types.SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(convert.subprocess, "run", fake_run)
+    failed: list[str] = []
+    count = convert.process_markitdown(
+        [f], cfg.scan_dir, cfg, dry_run=False, failed_files=failed,
+        log=convert.logging.getLogger("t"),
+    )
+    assert count == 1
+    assert not failed
+    assert (d / "a.md").read_text(encoding="utf-8") == "# md"
 
 
 def test_run_mineru_single_returns_md(cfg: Config, monkeypatch):

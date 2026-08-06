@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import shutil
+import stat
 import subprocess
 import time
 from collections import defaultdict
@@ -37,6 +38,25 @@ def _record_ocr_origin(cfg: Config, md_path: Path):
         logging.getLogger("kbimporter").warning(
             f"记录 OCR 来源失败（不影响转换结果）: {md_path}"
         )
+
+
+def _force_rmtree(path: Path):
+    """删除目录树；Windows 上先清除只读属性再重试。"""
+
+    def onerror(func, p, exc_info):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+
+    try:
+        shutil.rmtree(str(path), onerror=onerror)
+    except Exception:
+        try:
+            os.rmdir(path)
+        except Exception:
+            pass
 
 
 def run_with_kill(cmd: list[str], timeout: int) -> int:
@@ -131,6 +151,7 @@ def process_markitdown(files: list[Path], scan_dir: Path, cfg: Config,
         cmd = [cfg.markitdown_cmd, str(fpath), "-o", str(tmp_md)]
         log.debug(f"  执行: {' '.join(cmd)}")
         try:
+            ensure_dir(tmp_md.parent)
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode != 0:
                 err = result.stderr.strip().split("\n")[-1] if result.stderr else "unknown"
@@ -464,9 +485,13 @@ def run_convert(cfg: Config, dry_run: bool = False,
                 continue
             try:
                 if item.is_dir():
-                    shutil.rmtree(str(item))
+                    _force_rmtree(item)
                 elif item.is_file():
-                    item.unlink()
+                    try:
+                        item.unlink()
+                    except OSError:
+                        os.chmod(item, stat.S_IWRITE)
+                        item.unlink()
             except Exception as e:
                 log.warning(f"清理失败: {item.name}, 原因: {e}")
         remaining_lost = [f for f in lost_dir.rglob("*.pdf") if f.parent != lost_dir] if lost_dir.is_dir() else []
