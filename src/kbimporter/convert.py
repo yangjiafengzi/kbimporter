@@ -17,13 +17,23 @@ from kbimporter.util import ensure_dir, move_to_trash, remove_file, sha256_file
 
 
 def kill_process_tree(pid: int):
-    try:
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(pid)],
-            capture_output=True, timeout=10,
-        )
-    except Exception:
-        pass
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+    else:
+        import signal
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except Exception:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
 
 
 def _record_ocr_origin(cfg: Config, md_path: Path):
@@ -60,10 +70,14 @@ def _force_rmtree(path: Path):
 
 
 def run_with_kill(cmd: list[str], timeout: int) -> int:
-    proc = subprocess.Popen(
-        cmd,
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-    )
+    popen_kwargs: dict = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **popen_kwargs)
     try:
         proc.wait(timeout=timeout)
         return proc.returncode

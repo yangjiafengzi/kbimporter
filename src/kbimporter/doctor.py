@@ -31,16 +31,19 @@ def _which(*names: str) -> str | None:
 
 
 def _env_exe(env: str, exe: str) -> str | None:
-    for base in (Path.home() / "miniconda3" / "envs",
-                 Path.home() / "anaconda3" / "envs"):
-        p = (base / env / "Scripts" / exe) if env else (base.parent / "Scripts" / exe)
-        if p.exists():
-            return str(p)
-    if not env:
-        for base in (Path.home() / "miniconda3", Path.home() / "anaconda3"):
-            p = base / "Scripts" / exe
-            if p.exists():
-                return str(p)
+    names = [exe]
+    if exe.lower().endswith(".exe"):
+        names.append(exe[:-4])
+    else:
+        names.append(exe + ".exe")
+    for base in (Path.home() / "miniconda3", Path.home() / "anaconda3",
+                 Path.home() / "miniforge3", Path.home() / "mambaforge"):
+        env_dir = (base / "envs" / env) if env else base
+        for sub in ("Scripts", "bin"):
+            for name in names:
+                p = env_dir / sub / name
+                if p.exists():
+                    return str(p)
     return None
 
 

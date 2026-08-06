@@ -29,6 +29,13 @@ def venv_status(venv_dir: Path) -> str:
     return "exists_without_kb"
 
 
+def _pip_hint(venv_dir: Path) -> str:
+    """按平台返回虚拟环境内 pip 的安装命令提示。"""
+    if os.name == "nt":
+        return f"{venv_dir.name}\\Scripts\\pip install -e .[all]"
+    return f"{venv_dir.name}/bin/pip install -e .[all]"
+
+
 def _ask_yes_no(question: str, default: bool = True) -> bool:
     suffix = " [Y/n] " if default else " [y/N] "
     while True:
@@ -183,10 +190,10 @@ def run_setup(cfg: Config, logger: logging.Logger | None = None,
             log.info(f"  检测到虚拟环境已存在且已安装 kb: {venv_dir}")
         elif status == "exists_without_kb":
             log.info(f"  检测到虚拟环境已存在（未安装 kb）: {venv_dir}")
-            log.info(f"  cd {project_root} && {venv_dir.name}\\Scripts\\pip install -e .[all]")
+            log.info(f"  cd {project_root} && {_pip_hint(venv_dir)}")
         else:
             log.info(f"  1. python -m venv {venv_dir}")
-            log.info(f"  2. cd {project_root} && {venv_dir.name}\\Scripts\\pip install -e .[all]")
+            log.info(f"  2. cd {project_root} && {_pip_hint(venv_dir)}")
         log.info("  3. 运行 kb doctor 检查环境")
         log.info("  4. OCR 方案：有显卡用 MinerU 本地模型；无显卡用 PaddleOCR 云 API（见 README）")
 

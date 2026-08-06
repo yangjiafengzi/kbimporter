@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 import types
 from pathlib import Path
+
+import pytest
 
 from kbimporter import convert
 from kbimporter.config import Config
@@ -163,3 +166,15 @@ def test_run_convert_engine_cloud_dry_run(cfg: Config):
     (d / "a.pdf").write_bytes(b"pdf")
     stats = convert.run_convert(cfg, dry_run=True, scan_dir=cfg.scan_dir, engine="cloud")
     assert stats["pdf"] == 1
+
+
+def test_run_with_kill_success():
+    assert convert.run_with_kill([sys.executable, "-c", "print('ok')"], timeout=10) == 0
+
+
+def test_run_with_kill_timeout():
+    import subprocess as sp
+    with pytest.raises(sp.TimeoutExpired):
+        convert.run_with_kill(
+            [sys.executable, "-c", "import time; time.sleep(10)"], timeout=1
+        )

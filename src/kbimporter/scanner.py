@@ -116,21 +116,6 @@ def mark_done(conn: sqlite3.Connection, file_path: str, file_hash: str,
     conn.commit()
 
 
-def mark_deleted(conn: sqlite3.Connection, file_path: str):
-    conn.execute(
-        "UPDATE file_state SET status='deleted' WHERE file_path=?",
-        (file_path,),
-    )
-    conn.commit()
-
-
-def get_deleted_records(conn: sqlite3.Connection) -> list[dict]:
-    rows = conn.execute(
-        "SELECT file_path, collection_name, chunk_count FROM file_state WHERE status='deleted'"
-    ).fetchall()
-    return [{"path": r[0], "collection": r[1], "chunks": r[2]} for r in rows]
-
-
 def purge_deleted_records(conn: sqlite3.Connection, file_paths: list[str]):
     for fp in file_paths:
         conn.execute("DELETE FROM file_state WHERE file_path=?", (fp,))

@@ -97,10 +97,8 @@ def test_state_helpers(tmp_path: Path):
     assert st["hash"] == "h2"
     scanner.set_origin(conn, "/a.md", "ocr_md", "h2")
     assert scanner.get_origin(conn, "/a.md") == "ocr_md"
-    scanner.mark_deleted(conn, "/a.md")
-    assert scanner.get_deleted_records(conn)
     scanner.purge_deleted_records(conn, ["/a.md"])
-    assert not scanner.get_deleted_records(conn)
+    assert scanner.get_file_state(conn, "/a.md") is None
     conn.close()
 
 

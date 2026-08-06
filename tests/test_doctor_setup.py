@@ -52,3 +52,16 @@ def test_venv_status_detects_existing(tmp_path):
     (with_kb / "Scripts").mkdir(parents=True)
     (with_kb / "Scripts" / "kb.exe").write_bytes(b"")
     assert venv_status(with_kb) == "exists_with_kb"
+
+
+def test_env_exe_detects_scripts_and_bin(tmp_path, monkeypatch):
+    from kbimporter import doctor
+    monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: tmp_path))
+    win = tmp_path / "miniconda3" / "envs" / "ocr_env" / "Scripts" / "marker.exe"
+    win.parent.mkdir(parents=True)
+    win.write_bytes(b"")
+    posix = tmp_path / "miniconda3" / "envs" / "mineru_env" / "bin" / "mineru"
+    posix.parent.mkdir(parents=True)
+    posix.write_bytes(b"")
+    assert doctor._env_exe("ocr_env", "marker.exe") == str(win)
+    assert doctor._env_exe("mineru_env", "mineru") == str(posix)
