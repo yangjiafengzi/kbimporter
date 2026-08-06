@@ -122,11 +122,12 @@ model = "PaddleOCR-VL-1.6"
 api_key_env = "PADDLE_OCR_API_KEY"
 poll_interval = 5
 max_poll_seconds = 7200
+max_pages_per_task = 100
 ```
 
-流程：整份 PDF multipart 提交 -> 轮询 jobId -> 下载 JSONL ->
-解析 `layoutParsingResults[].markdown.text` -> 按页缓存并合并。
-断点续传：任务完成后不重复提交。
+流程：超过 `max_pages_per_task` 页时先按页拆分子 PDF -> 各子任务 multipart 提交 ->
+轮询 jobId -> 下载 JSONL -> 解析 `layoutParsingResults[].markdown.text` ->
+按页缓存并按页序合并。断点续传：已完成子任务不重复提交。
 
 #### `[cloud_ocr.baidu]`
 

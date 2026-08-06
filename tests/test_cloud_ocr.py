@@ -142,6 +142,82 @@ def test_paddle_provider_retries_failed_job(cfg, monkeypatch):
     assert calls["poll"] == 2
 
 
+def test_split_pdf_splits_by_pages(tmp_path: Path):
+    import fitz
+    src = tmp_path / "book.pdf"
+    doc = fitz.open()
+    for i in range(5):
+        page = doc.new_page()
+        page.insert_text((72, 72), f"page {i + 1}")
+    doc.save(str(src))
+    doc.close()
+    out = tmp_path / "split"
+    out.mkdir()
+    parts = cloud_ocr._split_pdf(src, out, 2)
+    assert len(parts) == 3
+    sizes = []
+    for p in parts:
+        d = fitz.open(str(p))
+        sizes.append(len(d))
+        d.close()
+    assert sizes == [2, 2, 1]
+
+
+def test_paddle_split_job_merges_parts(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="paddle")
+    monkeypatch.setenv("PADDLE_OCR_API_KEY", "token")
+    cfg.cloud_ocr.paddle.max_pages_per_task = 100
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 250)
+    monkeypatch.setattr(
+        cloud_ocr, "_split_pdf",
+        lambda pdf, out, maxp: [Path("a.pdf"), Path("b.pdf"), Path("c.pdf")],
+    )
+    calls: list[str] = []
+
+    def fake_job(cfg_, p, log):
+        calls.append(p.name)
+        return f"part{len(calls)}"
+
+    monkeypatch.setattr(cloud_ocr, "_paddle_ocr_job", fake_job)
+    text = cloud_ocr._paddle_ocr_split_job(cfg, "big.pdf", logging.getLogger("t"))
+    assert text == "part1\n\npart2\n\npart3"
+    assert calls == ["a.pdf", "b.pdf", "c.pdf"]
+
+
+def test_paddle_job_resets_checkpoint_when_pages_change(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="paddle")
+    monkeypatch.setenv("PADDLE_OCR_API_KEY", "token")
+    state_dir = cloud_ocr._state_dir(cfg, "doc.pdf")
+    cloud_ocr._save_checkpoint_paddle(
+        state_dir, {"job_id": "old", "total_pages": 3, "done_pages": [0, 1, 2]}
+    )
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 5)
+    calls = {"submit": 0}
+
+    def fake_submit(cfg_, pdf, log):
+        calls["submit"] += 1
+        return "job1"
+
+    monkeypatch.setattr(cloud_ocr, "_paddle_submit", fake_submit)
+    monkeypatch.setattr(
+        cloud_ocr, "_paddle_poll",
+        lambda c, j, l: {"resultUrl": {"jsonUrl": "u"}},
+    )
+    monkeypatch.setattr(
+        cloud_ocr, "_paddle_download_pages",
+        lambda c, d, l: [f"p{i}" for i in range(5)],
+    )
+    text = cloud_ocr._paddle_ocr_job(cfg, "doc.pdf", logging.getLogger("t"))
+    assert calls["submit"] == 1
+    assert text == "p0\n\np1\n\np2\n\np3\n\np4"
+
+
+def test_paddle_dry_run_reports_split(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="paddle")
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 250)
+    assert cloud_ocr.ocr_pdf_cloud(cfg, "big.pdf", dry_run=True) is None
+
+
 def test_baidu_token_requires_keys(cfg, monkeypatch):
     _enable_cloud(cfg, provider="baidu")
     monkeypatch.delenv("BAIDU_OCR_API_KEY", raising=False)

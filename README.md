@@ -373,7 +373,9 @@ kb ocr keys                                    # 查看各 provider 密钥是否
 
 `paddle` 是默认云端方案：整份 PDF 提交给 PaddleOCR 云端异步任务（PaddleOCR-VL-1.6），
 服务端分页识别后返回 Markdown；程序轮询进度、下载结果并做本地缓存，中断后不会重复提交
-已完成的任务。`baidu` 与 `openai` 是按页/按批请求，同样带断点续传，适合大文件分批 OCR。
+已完成的任务。超过 100 页的 PDF 会自动拆分为多个子任务（可在 `[cloud_ocr.paddle]`
+的 `max_pages_per_task` 调整），全部识别完成后按页序合并成一份 Markdown，每个子任务
+独立断点续传。`baidu` 与 `openai` 是按页/按批请求，同样带断点续传，适合大文件分批 OCR。
 
 ### 密钥（只设在本机环境变量，不写配置）
 

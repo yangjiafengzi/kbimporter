@@ -88,6 +88,8 @@ timeout = 120
 max_retries = 3
 poll_interval = 5
 max_poll_seconds = 7200
+# 单任务页数上限：超过后自动拆分为多个子任务，识别完成后按页序合并
+max_pages_per_task = 100
 use_doc_orientation_classify = false
 use_doc_unwarping = false
 use_chart_recognition = false

@@ -76,6 +76,7 @@ class PaddleCloudOCR:
     max_retries: int = 3
     poll_interval: int = 5
     max_poll_seconds: int = 7200
+    max_pages_per_task: int = 100
     use_doc_orientation_classify: bool = False
     use_doc_unwarping: bool = False
     use_chart_recognition: bool = False
@@ -344,7 +345,8 @@ class Config:
             if pdl.get(key):
                 setattr(cfg.cloud_ocr.paddle, key, str(pdl[key]))
         for key, cast in (("timeout", int), ("max_retries", int),
-                          ("poll_interval", int), ("max_poll_seconds", int)):
+                          ("poll_interval", int), ("max_poll_seconds", int),
+                          ("max_pages_per_task", int)):
             if pdl.get(key) is not None:
                 setattr(cfg.cloud_ocr.paddle, key, cast(pdl[key]))
         for key in ("use_doc_orientation_classify", "use_doc_unwarping",

@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import time
 import urllib.parse
 import urllib.request
@@ -277,10 +278,15 @@ def _paddle_ocr_job(cfg: Config, pdf_path: str | Path,
     """PaddleOCR 云端异步任务：提交整份 PDF -> 轮询 -> 下载 JSONL -> 合并。"""
     state_dir = _state_dir(cfg, pdf_path)
     cp = _load_checkpoint(state_dir) or {}
+    current_total = pdf_page_count(pdf_path)
     if cp.get("kind") == "paddle" and cp.get("total_pages") and \
             len(cp.get("done_pages", [])) >= cp["total_pages"]:
-        log.info("PaddleOCR 任务已完成，直接合并缓存")
-        return _merge_parts(state_dir, cp["total_pages"], 1)
+        if cp["total_pages"] == current_total:
+            log.info("PaddleOCR 任务已完成，直接合并缓存")
+            return _merge_parts(state_dir, cp["total_pages"], 1)
+        log.info("页数已变化，重置断点")
+        _clear_paddle_state(state_dir)
+        cp = {}
 
     pdl = cfg.cloud_ocr.paddle
     last_err: Exception | None = None
@@ -315,6 +321,63 @@ def _paddle_ocr_job(cfg: Config, pdf_path: str | Path,
             "done_pages": sorted(done_pages),
         })
     return _merge_parts(state_dir, total, 1)
+
+
+def _clear_paddle_state(state_dir: Path):
+    """清除 PaddleOCR 任务的断点与页缓存（用于页数变化后重新处理）。"""
+    cp = state_dir / "checkpoint.json"
+    try:
+        cp.unlink(missing_ok=True)
+    except OSError:
+        pass
+    parts = state_dir / "parts"
+    if parts.exists():
+        shutil.rmtree(parts, ignore_errors=True)
+
+
+def _split_pdf(pdf_path: str | Path, out_dir: Path, max_pages: int) -> list[Path]:
+    """按页把 PDF 拆成多个不超过 max_pages 页的子文件，返回按页序排列的路径。"""
+    fitz = _fitz()
+    src = fitz.open(str(pdf_path))
+    try:
+        total = len(src)
+        parts: list[Path] = []
+        for start in range(0, total, max_pages):
+            end = min(start + max_pages, total)
+            out = out_dir / f"{Path(pdf_path).stem}_p{start + 1:04d}-{end:04d}.pdf"
+            new = fitz.open()
+            try:
+                new.insert_pdf(src, from_page=start, to_page=end - 1)
+                new.save(str(out), garbage=3, deflate=True)
+            finally:
+                new.close()
+            parts.append(out)
+        return parts
+    finally:
+        src.close()
+
+
+def _paddle_ocr_split_job(cfg: Config, pdf_path: str | Path,
+                          log: logging.Logger) -> str:
+    """PaddleOCR 云端任务：超过单任务页数上限时自动拆分，识别后按页序合并。"""
+    pdl = cfg.cloud_ocr.paddle
+    total = pdf_page_count(pdf_path)
+    if total <= pdl.max_pages_per_task:
+        return _paddle_ocr_job(cfg, pdf_path, log)
+
+    log.warning(
+        f"PaddleOCR 单任务建议不超过 {pdl.max_pages_per_task} 页；"
+        f"当前 {total} 页，将拆分为多个子任务，识别完成后自动合并"
+    )
+    split_dir = _state_dir(cfg, pdf_path) / "split"
+    ensure_dir(split_dir)
+    parts = _split_pdf(pdf_path, split_dir, pdl.max_pages_per_task)
+    texts: list[str] = []
+    for i, sub in enumerate(parts, 1):
+        sub_total = pdf_page_count(sub)
+        log.info(f"  PaddleOCR 子任务 [{i}/{len(parts)}]: {sub.name}（{sub_total} 页）")
+        texts.append(_paddle_ocr_job(cfg, sub, log))
+    return "\n\n".join(t for t in texts if t and t.strip())
 
 
 def _save_checkpoint_paddle(state_dir: Path, payload: dict):
@@ -399,7 +462,18 @@ def ocr_pdf_cloud(cfg: Config, pdf_path: str | Path, dry_run: bool = False,
         if provider == "paddle":
             try:
                 n = pdf_page_count(pdf_path)
-                log.info(f"[dry-run] 将提交整份 PDF（约 {n} 页）到 PaddleOCR 云端异步任务（不调用 API）")
+                pdl = cfg.cloud_ocr.paddle
+                if n > pdl.max_pages_per_task:
+                    n_parts = math.ceil(n / pdl.max_pages_per_task)
+                    log.info(
+                        f"[dry-run] 将拆分 {n} 页为 {n_parts} 个子任务"
+                        f"（每任务 ≤{pdl.max_pages_per_task} 页）提交 PaddleOCR（不调用 API）"
+                    )
+                else:
+                    log.info(
+                        f"[dry-run] 将提交整份 PDF（约 {n} 页）到 PaddleOCR"
+                        " 云端异步任务（不调用 API）"
+                    )
             except Exception:
                 log.info("[dry-run] 将提交整份 PDF 到 PaddleOCR 云端异步任务（不调用 API）")
         else:
@@ -412,7 +486,7 @@ def ocr_pdf_cloud(cfg: Config, pdf_path: str | Path, dry_run: bool = False,
     log.warning("云端 OCR 将调用付费 API，并把文档图片发送到第三方服务（配置已显式开启）")
 
     if provider == "paddle":
-        return _paddle_ocr_job(cfg, pdf_path, log)
+        return _paddle_ocr_split_job(cfg, pdf_path, log)
 
     total = pdf_page_count(pdf_path)
     batch_size = cfg.cloud_ocr.openai.page_batch_size if provider == "openai" else 1
