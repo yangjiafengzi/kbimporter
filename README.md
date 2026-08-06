@@ -208,6 +208,128 @@ kb import                      # 真正写状态库 + Milvus（首次执行前�
 kb search --collection academic_library --kind dense "你的问题"
 ```
 
+### 1. 建立 Zotero 文献库（学术文献）
+
+1. 在 Zotero 中给文献添加 PDF/EPUB 附件（直接拖入条目，或右键条目 -> 添加附件）。
+2. 打开 Zotero 首选项 -> 高级 -> 文件与文件夹，勾选“自动将附件重命名为”，模板选择
+   “作者 - 年份 - 标题”。新附件会自动命名；对已有附件，选中后右键 -> 重命名文件，
+   手动完成一次命名（见上文“Zotero 侧配合”）。
+3. 在项目目录先预演，确认要同步的文件：
+   ```bash
+   kb sync-zotero --dry-run
+   ```
+   确认无误后执行：
+   ```bash
+   kb sync-zotero
+   ```
+   程序会扫描 Zotero storage，按基础文件名分组，自动选择“中文比例最低”的版本（原文）
+   复制到 `zotero文献库/library/`；旧版本和过期记录会移入回收目录。
+4. 转换 PDF/EPUB 为 Markdown：
+   ```bash
+   kb convert --dry-run
+   kb convert
+   ```
+   转换后在原目录生成同名 `.md`；已存在同名 `.md` 的文件自动跳过，避免重复 OCR。
+5. 增量导入向量库：
+   ```bash
+   kb import --dry-run
+   kb import
+   ```
+   文件进入 `academic_library` 集合，文件名自动解析出 `author / year / title`。
+6. 以后新增文献时，只需对新文献重复第 2 步（命名）和第 3~5 步；程序是增量的，
+   未变化的文件不会重复处理。
+
+### 2. 建立项目文献库（Zotero 筛选 + 手动复制）
+
+项目文献库不是全库同步，而是按项目人工筛选：
+
+1. 在 Zotero 中按项目建一个收藏夹（或用搜索/标签），把该项目相关的文献拖进去。
+2. 选中收藏夹中的条目，右键 -> “显示文件”（Show File），在文件管理器中找到对应
+   PDF/EPUB；也可以直接把附件拖拽到目标文件夹（Zotero 会复制一份）。
+3. 手动把选中的 PDF/EPUB 复制到 `知识库/项目文献/<项目名>/`。项目名用中文即可，
+   Milvus 集合会自动生成 `proj_<项目名拼音>`；文件名保持 `作者 - 年份 - 标题.pdf`
+   规范，便于解析元数据。
+4. 转换并导入：
+   ```bash
+   kb convert --dry-run
+   kb convert
+   kb import --dry-run
+   kb import
+   ```
+5. 避免重复 OCR：如果这些文献在文献库中已经转换过同名 MD，转换时会自动跳过
+   （`skip_existing_md` 默认开启）。之后运行 `kb dedupe --dry-run` 预演、再
+   `kb dedupe --execute`，可以把 `zotero文献库/library/` 中已有的同名 MD 复制/顶替到
+   项目目录（默认只替换本程序记录的 OCR 产物，旧文件进回收目录）。
+
+### 3. 建立田野调查数据库
+
+田野调查按项目组织，每个项目一个文件夹：
+
+```text
+田野调查笔记/
+└── 项目名/                 # 例如“某村基层治理”
+    ├── _项目信息.md         # 元数据模板，不会被切片
+    ├── 笔记/                # 访谈/观察记录，*.md
+    └── 其他材料/            # PDF 等补充材料，可被 convert 转 MD
+```
+
+`_项目信息.md` 模板：
+
+```markdown
+# 项目信息
+
+## 基本信息
+- 调研地点：某省某市某县某镇某村
+- 调研时间：2026年3月
+- 调研人员：张三、李四
+- 调研主题：基层治理与产业发展
+
+## 备注
+关于某村产业发展和基层治理的田野调查项目。
+```
+
+操作步骤：
+
+1. 在 `田野调查笔记/` 下创建项目文件夹，按上面的结构放置文件；笔记写成 `.md`
+   （建议文件名带日期，如 `2026-03-15 访谈记录.md`）。
+2. 有扫描件/PDF 时先转换：
+   ```bash
+   kb convert --dry-run
+   kb convert
+   ```
+3. 导入：
+   ```bash
+   kb import --dry-run
+   kb import
+   ```
+   `笔记/` 进入 `fieldwork_kb`（`source_type=note`），`其他材料/` 进入
+   `fieldwork_kb`（`source_type=supplement`）；`_项目信息.md` 中的地点、时间、人员、
+   备注会自动附加到该项目的全部记录。
+4. 之后修改 `_项目信息.md`，再跑 `kb import` 会自动 `upsert` 更新元数据，
+   无需重新导入笔记。
+
+### 4. 在 Cherry Studio 中配置 Agent
+
+前提：`kb import` 已完成，Milvus 集合可检索（可先用
+`kb search --collection academic_library --kind dense "测试"` 验证）。
+
+1. 安装并打开 Cherry Studio，在“设置 -> 模型服务”里配置好要使用的模型
+   （DeepSeek、Qwen、GPT 等均可）。
+2. 配置 Milvus MCP：进入“设置 -> MCP 服务器 -> 添加服务器”，使用 Milvus MCP Server
+   （GitHub: `zilliztech/mcp-server-milvus`，PyPI: `mcp-server-milvus`），按该仓库
+   README 的启动方式配置 Milvus 地址（如 `http://localhost:19530`），无认证可留空。
+3. 新建助手（Agent）：把 `agents/academic_advisor.md`（学术写作顾问）或
+   `agents/fieldwork_analyst.md`（田野调查数据分析师）的全文粘贴到“系统提示词”中。
+   这两个文件就是现成的 Agent 范例，来自 KB-Vectorize。
+4. 对话时选择已启用该 MCP 的模型。Agent 会按提示词调用 Milvus MCP 的检索工具，
+   访问 `academic_library` / `proj_*` / `fieldwork_kb` 集合。
+5. 如果暂时没有可用的 Milvus MCP，也可以把 `kb search --collection <集合> --kind
+   dense|bm25|query <词>` 的用法写进系统提示词，让 Agent 通过命令行完成同样的检索
+   （见 `agents/README.md`）。
+
+> Cherry Studio 的 MCP 安装方式随版本略有差异，以软件内“MCP 服务器”面板提示为准；
+> Milvus MCP 的具体启动命令见 `zilliztech/mcp-server-milvus` 的 README。
+
 ### 常用命令
 
 | 命令 | 说明 |
