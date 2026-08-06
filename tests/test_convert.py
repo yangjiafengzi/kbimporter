@@ -204,3 +204,49 @@ def test_build_marker_cmd_uses_resolved_exe(cfg, monkeypatch):
     )
     cmd = convert.build_marker_cmd(Path("in"), Path("out"), cfg)
     assert cmd[0] == r"C:\resolved\marker.exe"
+
+
+def _put_lost_pdf(cfg, rel="zotero文献库/library/doc.pdf"):
+    lost_pdf = cfg.ocr_work_dir / "lost" / rel
+    lost_pdf.parent.mkdir(parents=True, exist_ok=True)
+    lost_pdf.write_bytes(b"pdf")
+    dest_dir = cfg.scan_dir / Path(rel).parent
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    return lost_pdf
+
+
+def test_run_convert_processes_lost_first(cfg, monkeypatch):
+    lost_pdf = _put_lost_pdf(cfg)
+    cfg.engines = ["mineru"]
+
+    def fake_mineru(pdf_path, cfg_, log):
+        md = cfg_.ocr_work_dir / "mineru_out" / "doc.md"
+        md.parent.mkdir(parents=True, exist_ok=True)
+        md.write_text("mineru md", encoding="utf-8")
+        return md
+
+    monkeypatch.setattr(convert, "_run_mineru_single", fake_mineru)
+    stats = convert.run_convert(cfg, dry_run=False, scan_dir=cfg.scan_dir)
+    assert stats["pdf"] == 1
+    assert stats["retry"] == 1
+    assert (cfg.scan_dir / "zotero文献库" / "library" / "doc.md").read_text(
+        encoding="utf-8"
+    ) == "mineru md"
+    assert not lost_pdf.exists()
+
+
+def test_run_convert_skips_still_failed_in_stage3(cfg, monkeypatch):
+    lost_pdf = _put_lost_pdf(cfg)
+    cfg.engines = ["mineru"]
+    calls = {"n": 0}
+
+    def fake_mineru(pdf_path, cfg_, log):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(convert, "_run_mineru_single", fake_mineru)
+    stats = convert.run_convert(cfg, dry_run=False, scan_dir=cfg.scan_dir)
+    assert stats["failed"] == 1
+    assert stats["pdf"] == 0
+    assert calls["n"] == 1  # 阶段0 失败后，阶段3 不重复重试
+    assert lost_pdf.exists()

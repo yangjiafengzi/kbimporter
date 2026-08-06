@@ -289,7 +289,8 @@ def _run_mineru_single(pdf_path: Path, cfg: Config,
 def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
                           dry_run: bool, failed_files: list[str],
                           log: logging.Logger,
-                          pending_pdfs: list[Path] | None = None) -> int:
+                          pending_pdfs: list[Path] | None = None,
+                          skip_files: set[Path] | None = None) -> int:
     """按配置的引擎顺序重试失败的 PDF：marker_single -> mineru -> cloud。"""
     if pending_pdfs is not None:
         items: list[tuple[Path, Path]] = [
@@ -299,6 +300,8 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
         log.info(f"[阶段3] 直接引擎处理: {len(items)} 个 PDF（未启用 marker 批处理）")
     else:
         lost_pdfs = [f for f in lost_dir.rglob("*.pdf") if f.parent != lost_dir]
+        if skip_files:
+            lost_pdfs = [f for f in lost_pdfs if f not in skip_files]
         if not lost_pdfs:
             return 0
         items = []
@@ -379,6 +382,7 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
                 break
         else:
             log.warning(f"    全部引擎失败: {pdf_path.name}")
+            failed_files.append(str(dir_rel / pdf_path.name))
     log.info(f"[阶段3] 重试完成: {success}/{len(items)} 成功")
     return success
 
@@ -467,7 +471,7 @@ def run_convert(cfg: Config, dry_run: bool = False,
                 logger: logging.Logger | None = None,
                 scan_dir: Path | None = None,
                 engine: str | None = None) -> dict:
-    """综合文档转 Markdown：MarkItDown + Marker + lost 重试。"""
+    """综合文档转 Markdown：先重试 lost，再 MarkItDown + Marker + 新失败重试。"""
     log = logger or logging.getLogger("kbimporter")
     if engine:
         cfg.engines = [engine]
@@ -481,32 +485,45 @@ def run_convert(cfg: Config, dry_run: bool = False,
     if not dry_run:
         ensure_dir(cfg.ocr_work_dir)
 
+    failed_files: list[str] = []
+    lost_dir = cfg.ocr_work_dir / "lost"
+    lost_before: set[Path] = set()
+    if lost_dir.is_dir():
+        lost_before = {f for f in lost_dir.rglob("*.pdf") if f.parent != lost_dir}
+    lost_retry_success = 0
+    if lost_before:
+        log.info("=" * 60)
+        log.info(f"[阶段0] 先处理 lost 目录中的 {len(lost_before)} 个失败PDF")
+        lost_retry_success = process_retry_engines(
+            lost_dir, scan_dir, cfg, dry_run, failed_files, log
+        )
+    lost_still_failed = {f for f in lost_before if f.exists()}
+
     pdf_files, markitdown_files = find_files(scan_dir, cfg)
     total_all = len(pdf_files) + len(markitdown_files)
     log.info("=" * 60)
     log.info(f"综合文档转MD工具 ({'dry-run' if dry_run else '实际执行'})")
     log.info(f"扫描目录: {scan_dir}")
     log.info(f"扫描结果: {len(pdf_files)} 个 PDF, {len(markitdown_files)} 个其他文件 (共 {total_all} 个)")
-    if total_all == 0:
+    if total_all == 0 and not failed_files and lost_retry_success == 0:
         log.info("未找到任何可转换的文件")
         return {"total": 0, "markitdown": 0, "pdf": 0, "retry": 0, "failed": 0}
 
-    failed_files: list[str] = []
     md_success = process_markitdown(markitdown_files, scan_dir, cfg, dry_run, failed_files, log)
-    lost_dir = cfg.ocr_work_dir / "lost"
     marker_enabled = "marker" in cfg.engines
     if marker_enabled:
         pdf_success = process_pdfs(pdf_files, scan_dir, cfg, dry_run, failed_files, log)
         retry_success = process_retry_engines(
-            lost_dir, scan_dir, cfg, dry_run, failed_files, log
+            lost_dir, scan_dir, cfg, dry_run, failed_files, log,
+            skip_files=lost_still_failed,
         )
     else:
         pdf_success = 0
         retry_success = process_retry_engines(
             lost_dir, scan_dir, cfg, dry_run, failed_files, log,
-            pending_pdfs=pdf_files,
+            pending_pdfs=pdf_files, skip_files=lost_still_failed,
         )
-    pdf_success += retry_success
+    pdf_success += lost_retry_success + retry_success
 
     if not dry_run:
         for item in cfg.ocr_work_dir.iterdir():
@@ -529,13 +546,14 @@ def run_convert(cfg: Config, dry_run: bool = False,
     unique_failed = list(dict.fromkeys(failed_files))
     log.info("=" * 60)
     log.info(f"完成: MarkItDown {md_success}/{len(markitdown_files)}, "
-             f"PDF {pdf_success}/{len(pdf_files)}, 失败 {len(unique_failed)}")
+             f"PDF {pdf_success}/{len(pdf_files)} (lost重试 "
+             f"{lost_retry_success + retry_success}), 失败 {len(unique_failed)}")
     for f in unique_failed:
         log.info(f"  - {f}")
     return {
         "total": total_all,
         "markitdown": md_success,
         "pdf": pdf_success,
-        "retry": retry_success,
+        "retry": lost_retry_success + retry_success,
         "failed": len(unique_failed),
     }
