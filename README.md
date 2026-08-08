@@ -473,7 +473,7 @@ kb search --collection academic_library --kind dense "你的问题"
 | `kb import [--dry-run]` | 增量向量化导入 |
 | `kb dedupe [--execute] [--scope project\|library\|all]` | 去重/替换（默认预演） |
 | `kb search --collection <集合> --kind dense\|bm25\|query <词> [--filter 表达式]` | 检索 |
-| `kb ocr status / mode / enable / disable / keys` | OCR 模式与密钥管理 |
+| `kb ocr status / mode local\|hybrid [local\|cloud]\|cloud / enable / disable / keys` | OCR 模式、优先级与密钥管理 |
 
 ## 如何选择本地 / 云端 OCR
 
@@ -518,6 +518,51 @@ kb ocr keys                                    # 查看各 provider 密钥是否
 下一个，云端识别更稳。`baidu` 与 `openai` 是按页/按批请求，同样带断点续传，适合大文件
 分批 OCR。
 
+### 开启 MinerU 云端次选（推荐）
+
+MinerU 精准解析云 API 作为云端 OCR 的次选：主 provider（默认 PaddleOCR）整体失败时，
+自动切换到 MinerU 云端重试，降低“云端也识别不出来”的概率。启用步骤：
+
+1. 到 [MinerU API 管理页](https://mineru.net/apiManage/token) 创建 API token；
+2. 设置环境变量（PowerShell），然后**重新打开终端**：
+
+   ```powershell
+   setx MINERU_API_KEY "你的MinerU token"
+   ```
+
+3. 切换到带 MinerU 次选的混合模式：
+
+   ```bash
+   # 本地优先 + 云端（PaddleOCR -> MinerU）兜底，推荐
+   kb ocr enable --provider paddle --fallback mineru
+
+   # 或者云端优先：所有 PDF 先走云端，云端失败再本地
+   kb ocr mode hybrid cloud --provider paddle --fallback mineru
+   ```
+
+4. 预演确认（不调用 API）：
+
+   ```bash
+   kb convert --dry-run
+   ```
+
+5. 确认无误后执行 `kb convert`。`kb ocr status` 可随时查看当前模式、引擎链和密钥状态。
+
+也可以手动在 `kb_config.toml` 中配置（`kb init` 生成的模板已自带）：
+
+```toml
+[cloud_ocr]
+enabled = true
+provider = "paddle"
+fallback_providers = ["mineru"]   # 主 provider 失败后依次尝试的备选
+
+[cloud_ocr.mineru]
+api_key_env = "MINERU_API_KEY"
+model_version = "vlm"             # pipeline / vlm（推荐）/ MinerU-HTML
+is_ocr = true                     # 扫描件启用 OCR；文字版 PDF 可设 false 省钱
+max_pages_per_task = 200          # 超过 200 页自动拆分子任务
+```
+
 ### 密钥（只设在本机环境变量，不写配置）
 
 ```powershell
@@ -553,7 +598,8 @@ kb convert --engine cloud --dry-run
 - `[paths].kb_root`：知识库根目录（也可用环境变量 `KB_ROOT`）
 - `[paths].state_db`：增量状态库；老版本用户可直接指向旧 `import_state.db` 继续增量
 - `[converter].engines`：OCR 引擎回退链
-- `[cloud_ocr]`：云端 OCR 开关与 provider
+- `[cloud_ocr]`：云端 OCR 开关、provider 与 `fallback_providers` 回退链
+- `[cloud_ocr.mineru]`：MinerU 云端 API 参数（模型版本、OCR 开关、页数上限等）
 - `[milvus]`：Milvus 地址与 embedding 配置
 
 完整配置参考与开发/测试说明见 [AGENTS.md](AGENTS.md)。

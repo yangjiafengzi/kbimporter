@@ -75,6 +75,9 @@ replace_existing_md = "ocr_only"
 # 风险提示：云端 OCR 会调用付费 API（OpenAI 兼容接口按 token/图片计费，
 # 百度 OCR 按调用次数计费），且会把文档图片发送到第三方服务。
 # 必须在配置中显式 enabled = true 才会启用，默认关闭。
+# 常用命令（会自动写本配置）：
+#   kb ocr enable --provider paddle --fallback mineru               # 本地优先 + MinerU 云端次选
+#   kb ocr mode hybrid cloud --provider paddle --fallback mineru    # 云端优先 + MinerU 云端次选
 enabled = false
 provider = "paddle"   # paddle（首选，PaddleOCR 云 API）/ mineru / baidu / openai
 fallback_providers = ["mineru"]   # 主 provider 失败后依次尝试的备选（需对应密钥）

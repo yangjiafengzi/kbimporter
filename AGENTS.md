@@ -220,6 +220,20 @@ kb ocr keys
 `hybrid cloud` 写入 `engines=["cloud","marker","mineru"]`（云端优先，云端失败后
 用 marker_single / mineru 本地兜底）。`hybrid` 不带优先级默认本地优先。
 
+常用示例：
+
+```bash
+# 本地优先 + PaddleOCR -> MinerU 云端次选（推荐）
+kb ocr enable --provider paddle --fallback mineru
+# 云端优先 + 云端内部回退链
+kb ocr mode hybrid cloud --provider paddle --fallback mineru
+# 关闭云端，只留本地
+kb ocr mode local
+```
+
+MinerU 云端需要设置环境变量 `MINERU_API_KEY`（由 `[cloud_ocr.mineru].api_key_env`
+指定），密钥不写入配置或代码。`kb ocr keys` / `kb doctor` 可检查是否已设置。
+
 ### `kb dedupe`
 
 默认只预演；`--execute` 才实际执行；`--scope project|library|all`；
