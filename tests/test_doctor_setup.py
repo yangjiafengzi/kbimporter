@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 from kbimporter.doctor import scan_environment
-from kbimporter.setup import _set_config_value, run_setup, venv_status
+from kbimporter.setup import (
+    CLOUD_OCR_EXTRAS,
+    CORE_EXTRAS,
+    LOCAL_OCR_EXTRAS,
+    _set_config_value,
+    run_setup,
+    scheme_extras,
+    venv_status,
+)
 from kbimporter.util import setup_logging
 
 
@@ -27,6 +35,14 @@ def test_setup_non_interactive_prints_guidance(cfg, capsys):
     out = capsys.readouterr().out
     assert "非交互模式" in out
     assert "kb doctor" in out
+    assert "[import,sync,dedupe,convert]" in out
+    assert "[import,sync,dedupe,cloud]" in out
+
+
+def test_scheme_extras_mapping():
+    assert scheme_extras("1") == [*CORE_EXTRAS, *LOCAL_OCR_EXTRAS]
+    assert scheme_extras("2") == [*CORE_EXTRAS, *CLOUD_OCR_EXTRAS]
+    assert scheme_extras("3") == [*CORE_EXTRAS, *LOCAL_OCR_EXTRAS, *CLOUD_OCR_EXTRAS]
 
 
 def test_set_config_value_edits_section(tmp_path):

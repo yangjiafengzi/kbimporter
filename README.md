@@ -141,14 +141,22 @@ docker run -d --name milvus -p 19530:19530 \
 
 需要 Python 3.11+。
 
-从发行包安装：
+从发行包安装（按需选择 extras，避免一次性拉入 Marker/PyTorch 等重型依赖）：
 
 ```bash
-pip install "kbimporter-0.2.0-py3-none-any.whl[all]"
+# 核心：向量化导入 + Zotero 同步 + 去重（体积小，任何用法都需要）
+pip install "kbimporter-0.2.0-py3-none-any.whl[import,sync,dedupe]"
+# 之后按 OCR 方案补装：
+pip install "kbimporter-0.2.0-py3-none-any.whl[convert]"   # 本地引擎（Marker/MarkItDown，较重）
+pip install "kbimporter-0.2.0-py3-none-any.whl[cloud]"     # 云端 OCR（PaddleOCR/百度/OpenAI）
 ```
 
-发行包本身不捆绑第三方依赖，`[all]` 会一并安装向量化、同步、转换、云端 OCR 与去重所需
-的依赖；若已发布到 PyPI，也可直接 `pip install "kbimporter[all]"`。
+发行包本身不捆绑第三方依赖，extras 按需安装：`[import]`（向量化）、`[sync]`（Zotero
+同步）、`[convert]`（本地转换，含 marker-pdf 与 markitdown，会拉入 PyTorch，较重）、
+`[cloud]`（云端 OCR 客户端）、`[dedupe]`（去重）、`[search]`（检索，与 `[import]`
+共用 pymilvus）。不想挑选时也可以用 `[all]` 一次装齐，但会包含上述重型依赖；若已发布
+到 PyPI，把 `[...]` 前的发行包名换成 `kbimporter` 即可，如
+`pip install "kbimporter[import,sync,dedupe]"`。
 
 从源码安装（推荐，含 `kb setup` 引导）：
 
@@ -156,14 +164,14 @@ pip install "kbimporter-0.2.0-py3-none-any.whl[all]"
 git clone https://github.com/yangjiafengzi/kbimporter.git
 cd 知识库导入程序
 python -m venv .venv
-# Windows
-.venv\Scripts\pip install -e ".[all]"
+# Windows（先装核心，再按 OCR 方案补装）
+.venv\Scripts\pip install -e ".[import,sync,dedupe]"
 # macOS / Linux
-.venv/bin/pip install -e ".[all]"
+.venv/bin/pip install -e ".[import,sync,dedupe]"
 ```
 
-也可以按需选择 extras：`[import]`（向量化）、`[sync]`（Zotero 同步）、`[convert]`（本地
-转换）、`[cloud]`（云端 OCR）、`[dedupe]`（去重）、`[search]`（检索）、`[all]`（全部）。
+`kb setup` 会先询问显卡与 OCR 方案，再按方案自动安装对应 extras：本地/混合方案加装
+`[convert]`，云端/混合方案加装 `[cloud]`，不再默认安装 `[all]`。
 
 ### 3. 安装外部 OCR 引擎（按需）
 
@@ -172,13 +180,14 @@ python -m venv .venv
 `.venv\Scripts\pip install ...`，macOS/Linux 下使用 `.venv/bin/pip install ...`；
 MinerU 依赖更复杂，建议单独建 conda 环境（见下）。
 
-- Marker（文字版 PDF，CPU 可跑）：在项目虚拟环境中执行
-  `.venv\Scripts\pip install marker-pdf`（macOS/Linux：`.venv/bin/pip install marker-pdf`）
+- Marker（文字版 PDF，CPU 可跑）：装 `[convert]` extra 即可
+  （`.venv\Scripts\pip install -e ".[convert]"`，macOS/Linux 同理）；它体积较大
+  （含 PyTorch），只用云端 OCR 或 MinerU 时可以不装
 - MinerU（扫描件/公式，推荐 GPU）：
   `conda create -n mineru_env python=3.10 && conda activate mineru_env && pip install mineru`；
   国内网络可先设置 `MINERU_MODEL_SOURCE=modelscope`；它装在自己的 conda 环境中，
   程序通过 `[converter].mineru_cmd` 找到该环境的 `mineru` 命令即可
-- MarkItDown（Word/PPT/Excel/EPUB 等非 PDF）：同样装进项目虚拟环境
+- MarkItDown（Word/PPT/Excel/EPUB 等非 PDF）：`[convert]` 已包含；也可以单独安装
   （`.venv\Scripts\pip install markitdown`，macOS/Linux：`.venv/bin/pip install markitdown`）
 - 云端 OCR：无需安装引擎，只需设置 API 密钥（见“如何选择本地/云端 OCR”）
 
@@ -187,11 +196,11 @@ MinerU 依赖更复杂，建议单独建 conda 环境（见下）。
 ```bash
 kb init --root D:\知识库     # 生成 kb_config.toml 并创建目录结构
 kb doctor                    # 体检：依赖/引擎/密钥/Milvus 可达性（只读）
-kb setup                     # 或让程序引导创建虚拟环境、安装依赖、推荐 OCR 方案
+kb setup                     # 或让程序引导创建虚拟环境、按需安装依赖、推荐 OCR 方案
 ```
 
-`kb init` 会交互询问是否有高性能显卡并推荐 OCR 方案；`kb setup` 会先扫描本机已有依赖，
-再决定安装什么。
+`kb init` 会交互询问是否有高性能显卡并推荐 OCR 方案；`kb setup` 会先扫描本机环境，再
+询问显卡与 OCR 方案，并按方案按需安装依赖，不再默认安装全部重型包。
 
 ## 使用
 

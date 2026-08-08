@@ -10,6 +10,13 @@ from kbimporter.config import Config, DEFAULT_CONFIG_FILE
 from kbimporter.config_edit import set_toml_value as _set_config_value
 
 
+# 核心功能（向量化导入 / Zotero 同步 / 去重）体积较小，任何 OCR 方案都需要；
+# 重型依赖只出现在 convert（Marker/MarkItDown，含 PyTorch）与 cloud（云端 OCR API 客户端）中。
+CORE_EXTRAS = ("import", "sync", "dedupe")
+LOCAL_OCR_EXTRAS = ("convert",)
+CLOUD_OCR_EXTRAS = ("cloud",)
+
+
 def _project_root() -> Path:
     """定位项目根目录（含 pyproject.toml），优先包所在源码目录。"""
     pkg_dir = Path(__file__).resolve().parent
@@ -29,11 +36,12 @@ def venv_status(venv_dir: Path) -> str:
     return "exists_without_kb"
 
 
-def _pip_hint(venv_dir: Path) -> str:
+def _pip_hint(venv_dir: Path, extras: list[str] | None = None) -> str:
     """按平台返回虚拟环境内 pip 的安装命令提示。"""
+    spec = ".[all]" if not extras else f".[{','.join(extras)}]"
     if os.name == "nt":
-        return f"{venv_dir.name}\\Scripts\\pip install -e .[all]"
-    return f"{venv_dir.name}/bin/pip install -e .[all]"
+        return f"{venv_dir.name}\\Scripts\\pip install -e {spec}"
+    return f"{venv_dir.name}/bin/pip install -e {spec}"
 
 
 def _ask_yes_no(question: str, default: bool = True) -> bool:
@@ -63,6 +71,20 @@ def _ask_ocr_scheme() -> str:
         if choice in ("1", "2", "3"):
             return choice
         print("请输入 1、2 或 3")
+
+
+def scheme_extras(scheme: str) -> list[str]:
+    """按 OCR 方案返回需要安装的 extras。
+
+    本地引擎（1）安装 Marker/MarkItDown；云端 OCR（2）安装云端客户端；
+    混合（3）两者都装；核心依赖（import/sync/dedupe）始终安装。
+    """
+    extras = list(CORE_EXTRAS)
+    if scheme in ("1", "3"):
+        extras.extend(LOCAL_OCR_EXTRAS)
+    if scheme in ("2", "3"):
+        extras.extend(CLOUD_OCR_EXTRAS)
+    return extras
 
 
 def create_venv(venv_dir: Path, logger: logging.Logger) -> bool:
@@ -148,24 +170,31 @@ def run_setup(cfg: Config, logger: logging.Logger | None = None,
     venv_dir = venv_dir or (project_root / ".venv")
 
     if sys.stdin.isatty():
+        gpu = _ask_gpu()
+        print_engine_guidance(gpu, cfg, log)
+        scheme = _ask_ocr_scheme()
+        extras = scheme_extras(scheme)
+        log.info(
+            f"按当前方案安装 extras: [{','.join(extras)}]"
+            + ("（含本地转换引擎 marker-pdf，体积较大）" if scheme in ("1", "3") else "")
+        )
+
         status = venv_status(venv_dir)
         if status == "exists_with_kb":
             log.info(f"检测到已存在的虚拟环境，且已安装 kb: {venv_dir}（直接复用）")
-            if _ask_yes_no("更新 kbimporter 并补齐全部依赖到该环境吗？", default=False):
-                install_into_venv(venv_dir, ["all"], project_root, log)
+            if _ask_yes_no("更新 kbimporter，并按当前方案补装依赖到该环境吗？", default=False):
+                install_into_venv(venv_dir, extras, project_root, log)
         elif status == "exists_without_kb":
             log.info(f"检测到已存在的虚拟环境（尚未安装 kb）: {venv_dir}")
-            if _ask_yes_no("安装 kbimporter 全部依赖到该环境吗？（推荐）", default=True):
-                install_into_venv(venv_dir, ["all"], project_root, log)
+            if _ask_yes_no("按当前方案安装 kbimporter 及依赖到该环境吗？（推荐）", default=True):
+                install_into_venv(venv_dir, extras, project_root, log)
         else:
             if _ask_yes_no(f"创建虚拟环境 {venv_dir} 吗？", default=True):
                 if not create_venv(venv_dir, log):
                     return 1
-                if _ask_yes_no("安装 kbimporter 全部依赖到该虚拟环境吗？（推荐）", default=True):
-                    install_into_venv(venv_dir, ["all"], project_root, log)
-        gpu = _ask_gpu()
-        print_engine_guidance(gpu, cfg, log)
-        scheme = _ask_ocr_scheme()
+                if _ask_yes_no("按当前方案安装 kbimporter 及依赖到该虚拟环境吗？（推荐）", default=True):
+                    install_into_venv(venv_dir, extras, project_root, log)
+
         if scheme in ("2", "3"):
             cfg_path = cfg.config_path or (project_root / DEFAULT_CONFIG_FILE)
             if cfg_path.exists():
@@ -186,14 +215,22 @@ def run_setup(cfg: Config, logger: logging.Logger | None = None,
     else:
         log.info("非交互模式：仅打印引导信息。")
         status = venv_status(venv_dir)
+        local_hint = _pip_hint(venv_dir, scheme_extras("1"))
+        cloud_hint = _pip_hint(venv_dir, scheme_extras("2"))
+        hybrid_hint = _pip_hint(venv_dir, scheme_extras("3"))
         if status == "exists_with_kb":
             log.info(f"  检测到虚拟环境已存在且已安装 kb: {venv_dir}")
+            log.info(f"  按需补装依赖: {local_hint}（本地/混合）或 {cloud_hint}（云端）")
         elif status == "exists_without_kb":
             log.info(f"  检测到虚拟环境已存在（未安装 kb）: {venv_dir}")
-            log.info(f"  cd {project_root} && {_pip_hint(venv_dir)}")
+            log.info(f"  本地引擎方案: cd {project_root} && {local_hint}")
+            log.info(f"  云端 OCR 方案: cd {project_root} && {cloud_hint}")
+            log.info(f"  混合方案:     cd {project_root} && {hybrid_hint}")
         else:
             log.info(f"  1. python -m venv {venv_dir}")
-            log.info(f"  2. cd {project_root} && {_pip_hint(venv_dir)}")
+            log.info(f"  2. 本地引擎方案: cd {project_root} && {local_hint}")
+            log.info(f"     云端 OCR 方案: cd {project_root} && {cloud_hint}")
+            log.info(f"     混合方案:     cd {project_root} && {hybrid_hint}")
         log.info("  3. 运行 kb doctor 检查环境")
         log.info("  4. OCR 方案：有显卡用 MinerU 本地模型；无显卡用 PaddleOCR 云 API（见 README）")
 
