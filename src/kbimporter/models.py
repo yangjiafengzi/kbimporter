@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from kbimporter.config import Config
 
+_client_cache: dict[tuple[str, str], object] = {}
+
 
 def _pm():
     """延迟导入 pymilvus，便于在不安装 Milvus 依赖的环境下测试其他模块。"""
@@ -14,40 +16,89 @@ def _pm():
     return pymilvus
 
 
-def connect(cfg: Config):
+def _client_uri(cfg: Config) -> str:
+    return f"http://{cfg.milvus.host}:{cfg.milvus.port}"
+
+
+def get_client(cfg: Config):
+    """获取（并缓存）MilvusClient 实例；pymilvus 3.x 推荐 API。"""
     pm = _pm()
-    pm.connections.connect(host=cfg.milvus.host, port=cfg.milvus.port)
+    key = (cfg.milvus.host, cfg.milvus.port)
+    if key not in _client_cache:
+        _client_cache[key] = pm.MilvusClient(uri=_client_uri(cfg))
+    return _client_cache[key]
+
+
+def connect(cfg: Config):
+    """兼容入口：建立（或复用）MilvusClient 连接。"""
+    return get_client(cfg)
 
 
 def ensure_connected(cfg: Config):
-    """确保已建立 Milvus 连接（幂等），避免 ORM API 报 ConnectionNotExist。"""
-    pm = _pm()
-    try:
-        conn_mod = pm.connections
-        if conn_mod.has_connection("default"):
-            return
-        conn_mod.connect(host=cfg.milvus.host, port=cfg.milvus.port)
-    except AttributeError:
-        # 环境未提供 ORM connections（测试替身 / 仅 MilvusClient），跳过
-        return
+    """确保存在可用的 MilvusClient（幂等）。"""
+    return get_client(cfg)
 
 
-def _base_fields(cfg: Config):
+class MilvusCollection:
+    """内部集合句柄：把 MilvusClient 调用封装成少量 ORM 风格方法。"""
+
+    def __init__(self, client, name: str):
+        self._client = client
+        self.name = name
+
+    def load(self):
+        self._client.load_collection(collection_name=self.name)
+
+    def insert(self, rows: list[dict]) -> list[int]:
+        result = self._client.insert(collection_name=self.name, data=rows)
+        ids = result.get("ids", []) if isinstance(result, dict) else []
+        return [int(i) for i in ids]
+
+    def delete(self, expr: str):
+        self._client.delete(collection_name=self.name, filter=expr)
+
+    def upsert(self, rows: list[dict], partial_update: bool = False):
+        kwargs = {"partial_update": True} if partial_update else {}
+        self._client.upsert(collection_name=self.name, data=rows, **kwargs)
+
+    def query(self, expr: str = "", output_fields: list[str] | None = None,
+              limit: int | None = None, **kwargs):
+        return self._client.query(
+            collection_name=self.name,
+            filter=expr,
+            output_fields=output_fields,
+            limit=limit,
+            **kwargs,
+        )
+
+    def flush(self):
+        self._client.flush(collection_name=self.name)
+
+    @property
+    def num_entities(self) -> int:
+        stats = self._client.get_collection_stats(collection_name=self.name) or {}
+        return int(stats.get("row_count", 0) or 0)
+
+
+def _add_base_fields(schema, cfg: Config):
     pm = _pm()
-    return [
-        pm.FieldSchema(name="id", dtype=pm.DataType.INT64, is_primary=True, auto_id=True),
-        pm.FieldSchema(
-            name="text", dtype=pm.DataType.VARCHAR, max_length=65535,
-            enable_analyzer=True, analyzer_params={"type": "chinese"},
-        ),
-        pm.FieldSchema(name="source_file", dtype=pm.DataType.VARCHAR, max_length=512),
-        pm.FieldSchema(name="chunk_index", dtype=pm.DataType.INT32),
-        pm.FieldSchema(name="granularity", dtype=pm.DataType.VARCHAR, max_length=16),
-        pm.FieldSchema(name="parent_id", dtype=pm.DataType.INT64),
-        pm.FieldSchema(name="vector", dtype=pm.DataType.FLOAT_VECTOR, dim=cfg.milvus.embedding_dim),
-        pm.FieldSchema(name="sparse", dtype=pm.DataType.SPARSE_FLOAT_VECTOR),
-        pm.FieldSchema(name="created_at", dtype=pm.DataType.INT64),
-    ]
+    schema.add_field(
+        field_name="id", datatype=pm.DataType.INT64, is_primary=True, auto_id=True
+    )
+    schema.add_field(
+        field_name="text", datatype=pm.DataType.VARCHAR, max_length=65535,
+        enable_analyzer=True, analyzer_params={"type": "chinese"},
+    )
+    schema.add_field(field_name="source_file", datatype=pm.DataType.VARCHAR, max_length=512)
+    schema.add_field(field_name="chunk_index", datatype=pm.DataType.INT32)
+    schema.add_field(field_name="granularity", datatype=pm.DataType.VARCHAR, max_length=16)
+    schema.add_field(field_name="parent_id", datatype=pm.DataType.INT64)
+    schema.add_field(
+        field_name="vector", datatype=pm.DataType.FLOAT_VECTOR,
+        dim=cfg.milvus.embedding_dim,
+    )
+    schema.add_field(field_name="sparse", datatype=pm.DataType.SPARSE_FLOAT_VECTOR)
+    schema.add_field(field_name="created_at", datatype=pm.DataType.INT64)
 
 
 def _build_functions(cfg: Config):
@@ -71,86 +122,81 @@ def _build_functions(cfg: Config):
     return [dense_func, bm25_func]
 
 
-def _create_indexes(coll, cfg: Config, scalar_fields: list[str] | None = None):
-    pm = _pm()
-    coll.create_index(
+def _create_indexes(client, coll_name: str, cfg: Config,
+                    scalar_fields: list[str] | None = None):
+    params = client.prepare_index_params()
+    params.add_index(
         field_name="vector",
-        index_params={
-            "index_type": "HNSW",
-            "metric_type": "IP",
-            "params": {"M": cfg.milvus.hnsw_m, "efConstruction": cfg.milvus.hnsw_ef_construction},
-        },
+        index_type="HNSW",
+        metric_type="IP",
+        params={"M": cfg.milvus.hnsw_m, "efConstruction": cfg.milvus.hnsw_ef_construction},
     )
-    coll.create_index(
+    params.add_index(
         field_name="sparse",
-        index_params={"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "BM25"},
+        index_type="SPARSE_INVERTED_INDEX",
+        metric_type="BM25",
     )
     if scalar_fields:
         for field in scalar_fields:
-            coll.create_index(
-                field_name=field,
-                index_params={"index_type": "INVERTED"},
-            )
+            params.add_index(field_name=field, index_type="INVERTED")
+    client.create_index(collection_name=coll_name, index_params=params)
 
 
 def ensure_academic_library(cfg: Config):
     pm = _pm()
-    ensure_connected(cfg)
+    client = ensure_connected(cfg)
     name = "academic_library"
-    if pm.utility.has_collection(name):
-        return pm.Collection(name=name)
-    fields = _base_fields(cfg) + [
-        pm.FieldSchema(name="language", dtype=pm.DataType.VARCHAR, max_length=16),
-        pm.FieldSchema(name="author", dtype=pm.DataType.VARCHAR, max_length=256),
-        pm.FieldSchema(name="year", dtype=pm.DataType.INT32),
-        pm.FieldSchema(name="title", dtype=pm.DataType.VARCHAR, max_length=512),
-    ]
-    schema = pm.CollectionSchema(fields=fields, description="学术文献总库")
+    if client.has_collection(collection_name=name):
+        return MilvusCollection(client, name)
+    schema = pm.MilvusClient.create_schema(auto_id=True, description="学术文献总库")
+    _add_base_fields(schema, cfg)
+    schema.add_field(field_name="language", datatype=pm.DataType.VARCHAR, max_length=16)
+    schema.add_field(field_name="author", datatype=pm.DataType.VARCHAR, max_length=256)
+    schema.add_field(field_name="year", datatype=pm.DataType.INT32)
+    schema.add_field(field_name="title", datatype=pm.DataType.VARCHAR, max_length=512)
     for func in _build_functions(cfg):
         schema.add_function(func)
-    coll = pm.Collection(name=name, schema=schema)
-    _create_indexes(coll, cfg, scalar_fields=["language"])
-    return coll
+    client.create_collection(collection_name=name, schema=schema)
+    _create_indexes(client, name, cfg, scalar_fields=["language"])
+    return MilvusCollection(client, name)
 
 
 def ensure_project_collection(coll_name: str, cfg: Config):
     pm = _pm()
-    ensure_connected(cfg)
-    if pm.utility.has_collection(coll_name):
-        return pm.Collection(name=coll_name)
-    fields = _base_fields(cfg) + [
-        pm.FieldSchema(name="project_name", dtype=pm.DataType.VARCHAR, max_length=256),
-        pm.FieldSchema(name="language", dtype=pm.DataType.VARCHAR, max_length=16),
-        pm.FieldSchema(name="author", dtype=pm.DataType.VARCHAR, max_length=256),
-        pm.FieldSchema(name="year", dtype=pm.DataType.INT32),
-        pm.FieldSchema(name="title", dtype=pm.DataType.VARCHAR, max_length=512),
-    ]
-    schema = pm.CollectionSchema(fields=fields, description=f"项目文献库: {coll_name}")
+    client = ensure_connected(cfg)
+    if client.has_collection(collection_name=coll_name):
+        return MilvusCollection(client, coll_name)
+    schema = pm.MilvusClient.create_schema(auto_id=True, description=f"项目文献库: {coll_name}")
+    _add_base_fields(schema, cfg)
+    schema.add_field(field_name="project_name", datatype=pm.DataType.VARCHAR, max_length=256)
+    schema.add_field(field_name="language", datatype=pm.DataType.VARCHAR, max_length=16)
+    schema.add_field(field_name="author", datatype=pm.DataType.VARCHAR, max_length=256)
+    schema.add_field(field_name="year", datatype=pm.DataType.INT32)
+    schema.add_field(field_name="title", datatype=pm.DataType.VARCHAR, max_length=512)
     for func in _build_functions(cfg):
         schema.add_function(func)
-    coll = pm.Collection(name=coll_name, schema=schema)
-    _create_indexes(coll, cfg, scalar_fields=["project_name"])
-    return coll
+    client.create_collection(collection_name=coll_name, schema=schema)
+    _create_indexes(client, coll_name, cfg, scalar_fields=["project_name"])
+    return MilvusCollection(client, coll_name)
 
 
 def ensure_fieldwork_kb(cfg: Config):
     pm = _pm()
-    ensure_connected(cfg)
+    client = ensure_connected(cfg)
     name = "fieldwork_kb"
-    if pm.utility.has_collection(name):
-        return pm.Collection(name=name)
-    fields = _base_fields(cfg) + [
-        pm.FieldSchema(name="source_type", dtype=pm.DataType.VARCHAR, max_length=32),
-        pm.FieldSchema(name="source_path", dtype=pm.DataType.VARCHAR, max_length=1024),
-        pm.FieldSchema(name="project_name", dtype=pm.DataType.VARCHAR, max_length=256),
-        pm.FieldSchema(name="location", dtype=pm.DataType.VARCHAR, max_length=256),
-        pm.FieldSchema(name="research_date", dtype=pm.DataType.VARCHAR, max_length=64),
-        pm.FieldSchema(name="researchers", dtype=pm.DataType.VARCHAR, max_length=512),
-        pm.FieldSchema(name="notes", dtype=pm.DataType.VARCHAR, max_length=2048),
-    ]
-    schema = pm.CollectionSchema(fields=fields, description="田野调查知识库")
+    if client.has_collection(collection_name=name):
+        return MilvusCollection(client, name)
+    schema = pm.MilvusClient.create_schema(auto_id=True, description="田野调查知识库")
+    _add_base_fields(schema, cfg)
+    schema.add_field(field_name="source_type", datatype=pm.DataType.VARCHAR, max_length=32)
+    schema.add_field(field_name="source_path", datatype=pm.DataType.VARCHAR, max_length=1024)
+    schema.add_field(field_name="project_name", datatype=pm.DataType.VARCHAR, max_length=256)
+    schema.add_field(field_name="location", datatype=pm.DataType.VARCHAR, max_length=256)
+    schema.add_field(field_name="research_date", datatype=pm.DataType.VARCHAR, max_length=64)
+    schema.add_field(field_name="researchers", datatype=pm.DataType.VARCHAR, max_length=512)
+    schema.add_field(field_name="notes", datatype=pm.DataType.VARCHAR, max_length=2048)
     for func in _build_functions(cfg):
         schema.add_function(func)
-    coll = pm.Collection(name=name, schema=schema)
-    _create_indexes(coll, cfg, scalar_fields=["source_type", "project_name"])
-    return coll
+    client.create_collection(collection_name=name, schema=schema)
+    _create_indexes(client, name, cfg, scalar_fields=["source_type", "project_name"])
+    return MilvusCollection(client, name)

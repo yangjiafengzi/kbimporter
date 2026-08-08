@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 DEFAULT_CONFIG_FILE = "kb_config.toml"
+CONFIG_ENV = "KB_CONFIG"
 
 DEFAULT_CLOUD_OCR_PROMPT = (
     "你是一位专业的 OCR 识别专家。请识别图片中的全部文字，"
@@ -357,10 +358,14 @@ class Config:
 
 
 def load_config(path: str | Path | None = None) -> Config:
-    """加载配置：TOML 文件 + 环境变量覆盖 + 派生路径。"""
-    cfg_path = Path(path) if path else Path(DEFAULT_CONFIG_FILE)
+    """加载配置：TOML 文件 + 环境变量覆盖 + 派生路径。
+
+    配置文件查找顺序：显式 --config > KB_CONFIG 环境变量 > 当前目录 >
+    项目根（源码安装时） > 全局配置目录（%APPDATA%/kbimporter 或 ~/.config/kbimporter）。
+    """
+    cfg_path = discover_config_path(path)
     raw: dict = {}
-    if cfg_path.exists():
+    if cfg_path is not None and cfg_path.exists():
         with open(cfg_path, "rb") as f:
             raw = tomllib.load(f)
     cfg = Config.from_dict(raw)
@@ -368,3 +373,44 @@ def load_config(path: str | Path | None = None) -> Config:
     cfg.derive()
     cfg.config_path = cfg_path
     return cfg
+
+
+def discover_config_path(explicit: str | Path | None = None) -> Path | None:
+    """按统一顺序查找配置文件；找不到返回 None。"""
+    if explicit:
+        p = Path(explicit)
+        return p if p.exists() else None
+
+    env_path = os.environ.get(CONFIG_ENV)
+    if env_path:
+        p = Path(env_path)
+        if p.exists():
+            return p
+
+    cwd_file = Path(DEFAULT_CONFIG_FILE)
+    if cwd_file.exists():
+        return cwd_file
+
+    # 源码安装时包目录的上级可能是项目根
+    pkg_parents = Path(__file__).resolve().parents
+    for cand in (pkg_parents[2], pkg_parents[1]):
+        p = cand / DEFAULT_CONFIG_FILE
+        if p.exists():
+            return p
+
+    for d in _global_config_dirs():
+        p = d / DEFAULT_CONFIG_FILE
+        if p.exists():
+            return p
+    return None
+
+
+def _global_config_dirs() -> list[Path]:
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return [Path(appdata) / "kbimporter"]
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return [Path(xdg) / "kbimporter"]
+    return [Path.home() / ".config" / "kbimporter"]

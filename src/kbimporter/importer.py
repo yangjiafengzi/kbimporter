@@ -8,6 +8,7 @@ from pathlib import Path
 from kbimporter.chunker import chunk_document
 from kbimporter.config import Config
 from kbimporter.models import (
+    MilvusCollection,
     ensure_academic_library,
     ensure_connected,
     ensure_fieldwork_kb,
@@ -33,6 +34,22 @@ from kbimporter.util import read_text_safe, sha256_file
 
 _collection_cache: dict[str, object] = {}
 
+_MILVUS_HINT = (
+    "排障：若错误与嵌入/Function/集合相关，请检查 Milvus 服务端密钥"
+    "（MILVUSAI_DASHSCOPE_API_KEY 或 user.yaml credential）、dashscope url 是否为"
+    "原生 embeddings 地址、embedding_model / embedding_dim 是否匹配。"
+    "可运行 `kb doctor --deep` 一步定位。"
+)
+
+
+def _milvus_error_hint(exc: Exception) -> str:
+    text = str(exc).lower()
+    keywords = ("function", "textembedding", "embedding", "dashscope",
+                "404", "milvus", "collection", "collection not found")
+    if any(k in text for k in keywords):
+        return _MILVUS_HINT
+    return ""
+
 
 def _source_rel_path(state_path: str, root: Path) -> str:
     """把状态库中的文件路径转换为 Milvus source_file（相对知识库根、正斜杠）。"""
@@ -44,19 +61,17 @@ def _source_rel_path(state_path: str, root: Path) -> str:
 
 
 def _get_collection(coll_name: str, cfg: Config):
-    from pymilvus import Collection
-    ensure_connected(cfg)
+    client = ensure_connected(cfg)
     if coll_name not in _collection_cache:
-        coll = Collection(name=coll_name)
+        coll = MilvusCollection(client, coll_name)
         coll.load()
         _collection_cache[coll_name] = coll
     return _collection_cache[coll_name]
 
 
 def _delete_old_vectors(coll_name: str, source_file: str, cfg: Config):
-    from pymilvus import utility
-    ensure_connected(cfg)
-    if not utility.has_collection(coll_name):
+    client = ensure_connected(cfg)
+    if not client.has_collection(collection_name=coll_name):
         return
     coll = _get_collection(coll_name, cfg)
     escaped = source_file.replace("'", "\\'")
@@ -68,8 +83,7 @@ def _batch_insert(coll, rows: list[dict], cfg: Config) -> list[int]:
     batch_size = cfg.milvus.batch_size
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i + batch_size]
-        result = coll.insert(batch)
-        all_ids.extend(result.primary_keys)
+        all_ids.extend(coll.insert(batch))
     return all_ids
 
 
@@ -221,8 +235,7 @@ def _check_and_update_fieldwork_meta(db_conn, proj_dir_map: dict[str, Path],
 
 def _cleanup_empty_project_collections(db_conn, cfg: Config,
                                        log: logging.Logger) -> int:
-    from pymilvus import Collection, utility
-    ensure_connected(cfg)
+    client = ensure_connected(cfg)
     active_colls = set()
     rows = db_conn.execute(
         "SELECT DISTINCT collection_name FROM file_state WHERE status = 'done'"
@@ -230,13 +243,13 @@ def _cleanup_empty_project_collections(db_conn, cfg: Config,
     for r in rows:
         active_colls.add(r[0])
     dropped = 0
-    for name in utility.list_collections():
+    for name in client.list_collections():
         if not name.startswith("proj_"):
             continue
         if name in active_colls:
             continue
         try:
-            row_count = Collection(name).num_entities
+            row_count = MilvusCollection(client, name).num_entities
         except Exception as e:
             log.warning(f"  跳过集合检查 {name}: {e}")
             continue
@@ -245,7 +258,7 @@ def _cleanup_empty_project_collections(db_conn, cfg: Config,
             continue
         if name in _collection_cache:
             _collection_cache.pop(name)
-        utility.drop_collection(name)
+        client.drop_collection(collection_name=name)
         log.info(f"  ✓ 已清理空 Collection: {name}")
         dropped += 1
     return dropped
@@ -354,6 +367,9 @@ def run_import(cfg: Config, dry_run: bool = False,
                 log.info(f"    ✓ 处理完成 ({count} 条)")
             except Exception as e:
                 log.info(f"    ✗ 处理失败: {e}")
+                hint = _milvus_error_hint(e)
+                if hint:
+                    log.info(f"      {hint}")
                 stats["error"] += 1
 
         if fieldwork_proj_dirs and not dry_run:
@@ -367,7 +383,6 @@ def run_import(cfg: Config, dry_run: bool = False,
         if not dry_run:
             dropped = _cleanup_empty_project_collections(conn, cfg, log)
             log.info("正在 flush 所有 Collection...")
-            from pymilvus import Collection
             for name, coll in _collection_cache.items():
                 coll.flush()
                 log.info(f"  ✓ {name} 已 flush")

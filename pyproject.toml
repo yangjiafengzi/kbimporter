@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kbimporter"
-version = "0.2.0"
+version = "0.3.0"
 description = "知识库导入程序：统一 Zotero 同步、文档转 Markdown、去重清理与 Milvus 向量化导入"
 readme = "README.md"
 license = "MIT"
@@ -25,6 +25,7 @@ Repository = "https://github.com/yangjiafengzi/kbimporter"
 import = ["pymilvus>=2.4,<3.1", "pypinyin>=0.52"]
 sync = ["PyMuPDF>=1.24", "EbookLib>=0.18", "beautifulsoup4>=4.12"]
 convert = ["marker-pdf>=1.0", "markitdown>=0.1"]
+ocr = ["marker-pdf>=1.0", "markitdown>=0.1"]
 cloud = ["openai>=1.0", "PyMuPDF>=1.24", "requests>=2.31"]
 dedupe = ["pdfplumber>=0.11", "EbookLib>=0.18", "beautifulsoup4>=4.12"]
 search = ["pymilvus>=2.4,<3.1"]

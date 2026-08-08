@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sys
+import types
+
+from kbimporter import doctor
 from kbimporter.doctor import scan_environment
 from kbimporter.setup import (
     CLOUD_OCR_EXTRAS,
@@ -27,6 +31,7 @@ def test_doctor_scan_returns_structure(cfg, monkeypatch):
     assert info["milvus_reachable"] is False
     assert info["state_db"]["path"] == str(cfg.state_db)
     assert "interpreters" in info
+    assert isinstance(info["pip"], str)
 
 
 def test_setup_non_interactive_prints_guidance(cfg, capsys):
@@ -35,7 +40,7 @@ def test_setup_non_interactive_prints_guidance(cfg, capsys):
     out = capsys.readouterr().out
     assert "非交互模式" in out
     assert "kb doctor" in out
-    assert "[import,sync,dedupe,convert]" in out
+    assert "[import,sync,dedupe,ocr]" in out
     assert "[import,sync,dedupe,cloud]" in out
 
 
@@ -81,3 +86,82 @@ def test_env_exe_detects_scripts_and_bin(tmp_path, monkeypatch):
     posix.write_bytes(b"")
     assert doctor._env_exe("ocr_env", "marker.exe") == str(win)
     assert doctor._env_exe("mineru_env", "mineru") == str(posix)
+
+
+def test_check_embedding_chain_ok_and_cleans_probe(cfg, monkeypatch):
+    class _DataType:
+        INT64 = "INT64"
+        VARCHAR = "VARCHAR"
+        FLOAT_VECTOR = "FLOAT_VECTOR"
+
+    class _FunctionType:
+        TEXTEMBEDDING = "TEXTEMBEDDING"
+
+    class _Schema:
+        def __init__(self, **kwargs):
+            self.fields = []
+            self.functions = []
+
+        def add_field(self, field_name, datatype, **kwargs):
+            self.fields.append(field_name)
+
+        def add_function(self, fn):
+            self.functions.append(fn)
+
+    class _IndexParams:
+        def add_index(self, field_name, index_type="", **kwargs):
+            pass
+
+    class _FakeClient:
+        instances = []
+
+        def __init__(self, uri="", **kwargs):
+            self.uri = uri
+            self.dropped = []
+            self.rows = [{"text": "测试嵌入功能", "vector": [0.1] * cfg.milvus.embedding_dim}]
+            _FakeClient.instances.append(self)
+
+        @staticmethod
+        def create_schema(**kwargs):
+            return _Schema(**kwargs)
+
+        def prepare_index_params(self):
+            return _IndexParams()
+
+        def has_collection(self, collection_name, **kwargs):
+            return collection_name in self.dropped or collection_name == "_probe_kbimporter"
+
+        def create_collection(self, collection_name, schema=None, **kwargs):
+            pass
+
+        def create_index(self, collection_name, index_params=None, **kwargs):
+            pass
+
+        def drop_collection(self, collection_name, **kwargs):
+            self.dropped.append(collection_name)
+
+        def insert(self, collection_name, data, **kwargs):
+            pass
+
+        def flush(self, collection_name, **kwargs):
+            pass
+
+        def load_collection(self, collection_name, **kwargs):
+            pass
+
+        def query(self, collection_name, filter="", output_fields=None, limit=None, **kwargs):
+            return self.rows
+
+        def close(self):
+            pass
+
+    fake = types.ModuleType("pymilvus")
+    fake.MilvusClient = _FakeClient
+    fake.DataType = _DataType
+    fake.FunctionType = _FunctionType
+    fake.Function = lambda **kw: kw
+    monkeypatch.setitem(sys.modules, "pymilvus", fake)
+
+    ok = doctor.check_embedding_chain(cfg, doctor.logging.getLogger("t"))
+    assert ok is True
+    assert "_probe_kbimporter" in _FakeClient.instances[-1].dropped

@@ -242,10 +242,10 @@ kb search --collection academic_library --kind dense "村干部角色" \
 ### 10.2 Python 混合检索（dense + sparse，RRF 重排序）
 
 ```python
-from pymilvus import Collection, AnnSearchRequest, RRFRanker
+from pymilvus import MilvusClient, AnnSearchRequest, RRFRanker
 
-coll = Collection("academic_library")
-coll.load()
+client = MilvusClient("http://localhost:19530")
+client.load_collection("academic_library")
 
 dense_req = AnnSearchRequest(
     data=["社会学理论"], anns_field="vector",
@@ -255,7 +255,8 @@ sparse_req = AnnSearchRequest(
     data=["社会学理论"], anns_field="sparse",
     param={"metric_type": "BM25"}, limit=10,
 )
-results = coll.hybrid_search(
+results = client.hybrid_search(
+    collection_name="academic_library",
     reqs=[dense_req, sparse_req],
     rerank=RRFRanker(),
     limit=5,

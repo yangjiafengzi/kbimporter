@@ -43,7 +43,7 @@ src/kbimporter/
 ├── util.py        # 哈希/编码/回收目录/日志
 ├── chunker.py     # 双层切片
 ├── scanner.py     # 扫描/分类/增量状态/SQLite
-├── models.py      # Milvus Schema 与集合管理（ORM API，pymilvus<3.1）
+├── models.py      # Milvus Schema 与集合管理（MilvusClient API）
 ├── importer.py    # 增量导入编排
 ├── zotero_sync.py # Zotero storage -> 文献库
 ├── convert.py     # MarkItDown + marker/mineru/cloud 引擎链
@@ -153,15 +153,17 @@ kb init --root <知识库路径> [--output <配置路径>] [--interactive] [--fo
 
 ### `kb status` / `kb scan` / `kb doctor`
 
-三者均只读。`doctor` 会探测当前解释器之外的其他 Python 环境
+三者默认均只读。`doctor` 会探测当前解释器之外的其他 Python 环境
 （miniconda base、conda envs、系统 Python），报告依赖可复用情况；
 环境变量提示按 `cloud_ocr.provider` 精准给出。
+`kb doctor --deep` 是显式写操作：临时创建并删除 `_probe_kbimporter` 集合，
+用于端到端嵌入体检，只碰该临时集合。
 
 ### `kb setup`
 
 先运行 doctor 体检，再询问显卡与 OCR 方案（本地 / 云端 / 混合），
 按方案安装对应 extras：核心 `[import,sync,dedupe]` 始终安装，本地/混合
-加 `[convert]`，云端/混合加 `[cloud]`；随后按需创建、复用虚拟环境或补装
+加 `[ocr]`，云端/混合加 `[cloud]`；随后按需创建、复用虚拟环境或补装
 依赖，可自动写入配置。非交互模式只打印按方案安装的命令提示。
 
 ### `kb import`

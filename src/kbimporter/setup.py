@@ -13,7 +13,7 @@ from kbimporter.config_edit import set_toml_value as _set_config_value
 # 核心功能（向量化导入 / Zotero 同步 / 去重）体积较小，任何 OCR 方案都需要；
 # 重型依赖只出现在 convert（Marker/MarkItDown，含 PyTorch）与 cloud（云端 OCR API 客户端）中。
 CORE_EXTRAS = ("import", "sync", "dedupe")
-LOCAL_OCR_EXTRAS = ("convert",)
+LOCAL_OCR_EXTRAS = ("ocr",)
 CLOUD_OCR_EXTRAS = ("cloud",)
 
 
@@ -128,6 +128,9 @@ def install_into_venv(venv_dir: Path, extras: list[str], project_root: Path,
         return True
     except Exception as e:
         logger.error(f"安装依赖失败: {e}")
+        logger.info("如因网络超时/长时间无进展，请切换国内 PyPI 镜像后重试，例如：")
+        logger.info("  pip install -i https://mirrors.aliyun.com/pypi/simple/ "
+                    f"-e {spec}")
         return False
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import importlib.metadata
 import json
 import logging
 import os
@@ -28,6 +29,25 @@ def _which(*names: str) -> str | None:
         if p:
             return p
     return None
+
+
+def _pip_version() -> str:
+    """返回当前解释器的 pip 版本；检测不到时返回空字符串。"""
+    try:
+        return importlib.metadata.version("pip")
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(
+            [sys.executable, "-m", "pip", "--version"],
+            capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+        )
+        if out.returncode == 0 and out.stdout.split():
+            return out.stdout.split()[1]
+    except Exception:
+        pass
+    return ""
 
 
 def _env_exe(env: str, exe: str) -> str | None:
@@ -96,7 +116,7 @@ def scan_environment(cfg: Config) -> dict:
     result: dict = {}
     result["python"] = sys.version.split()[0]
     result["python_exe"] = sys.executable
-    result["pip"] = bool(_which("pip", "pip3"))
+    result["pip"] = _pip_version()
 
     result["packages"] = {
         "pypinyin": _package_installed("pypinyin"),
@@ -159,7 +179,8 @@ def print_report(info: dict, log: logging.Logger):
     log.info("kb doctor 环境体检")
     log.info("=" * 60)
     log.info(f"Python: {info['python']} ({info['python_exe']})")
-    log.info(f"pip: {'✓ 可用' if info['pip'] else '✗ 未找到'}")
+    pip_ver = info["pip"]
+    log.info(f"pip: {'✓ ' + pip_ver if pip_ver else '✗ 未找到'}")
     log.info("-" * 60)
     log.info("Python 依赖:")
     for name, ok in info["packages"].items():
@@ -204,8 +225,121 @@ def print_report(info: dict, log: logging.Logger):
     log.info("  3. 运行 `kb status` 查看知识库，`kb import --dry-run` 预演导入")
 
 
-def run_doctor(cfg: Config, logger: logging.Logger | None = None) -> dict:
+def run_doctor(cfg: Config, logger: logging.Logger | None = None,
+               deep: bool = False) -> dict:
     log = logger or logging.getLogger("kbimporter")
     info = scan_environment(cfg)
     print_report(info, log)
+    if deep:
+        check_embedding_chain(cfg, log)
     return info
+
+
+def _embedding_troubleshooting(cfg: Config) -> str:
+    return (
+        "排障建议：\n"
+        "  1. Milvus 服务端已配置 MILVUSAI_DASHSCOPE_API_KEY（或 user.yaml 的 credential）\n"
+        "  2. 自定义端点时 url 必须是 DashScope 原生 embeddings 地址：\n"
+        "     https://<你的端点>/api/v1/services/embeddings/text-embedding/text-embedding\n"
+        "     （不是 OpenAI 兼容的 compatible-mode 地址）\n"
+        f"  3. embedding_model = {cfg.milvus.embedding_model} 需与 Milvus 服务端配置一致\n"
+        f"  4. embedding_dim = {cfg.milvus.embedding_dim} 需与模型输出维度一致"
+        "（text-embedding-v3 为 1024）\n"
+        "  5. 出现 404 / 数量不匹配时优先检查第 1、2 项"
+    )
+
+
+def check_embedding_chain(cfg: Config, log: logging.Logger) -> bool:
+    """端到端嵌入体检：临时建集合 -> insert -> flush/load/query -> 校验维度 -> 删除。"""
+    probe = "_probe_kbimporter"
+    log.info("=" * 60)
+    log.info(f"kb doctor --deep：端到端嵌入体检（临时集合 {probe}，结束后自动删除）")
+    log.info("=" * 60)
+    try:
+        from pymilvus import MilvusClient, DataType, Function, FunctionType
+    except ImportError:
+        log.info("✗ pymilvus 未安装，无法体检嵌入链路")
+        return False
+
+    client = None
+    try:
+        client = MilvusClient(
+            uri=f"http://{cfg.milvus.host}:{cfg.milvus.port}", timeout=10
+        )
+        if client.has_collection(collection_name=probe):
+            client.drop_collection(collection_name=probe)
+        schema = MilvusClient.create_schema(auto_id=True, description="kb doctor 临时体检")
+        schema.add_field(
+            field_name="id", datatype=DataType.INT64, is_primary=True, auto_id=True
+        )
+        schema.add_field(
+            field_name="text", datatype=DataType.VARCHAR, max_length=512
+        )
+        schema.add_field(
+            field_name="vector", datatype=DataType.FLOAT_VECTOR,
+            dim=cfg.milvus.embedding_dim,
+        )
+        fn = Function(
+            name="text_dense_emb",
+            input_field_names=["text"],
+            output_field_names=["vector"],
+            function_type=FunctionType.TEXTEMBEDDING,
+            params={
+                "provider": cfg.milvus.embedding_provider,
+                "model_name": cfg.milvus.embedding_model,
+            },
+        )
+        schema.add_function(fn)
+        client.create_collection(collection_name=probe, schema=schema)
+        params = client.prepare_index_params()
+        params.add_index(
+            field_name="vector",
+            index_type="HNSW",
+            metric_type="IP",
+            params={
+                "M": cfg.milvus.hnsw_m,
+                "efConstruction": cfg.milvus.hnsw_ef_construction,
+            },
+        )
+        client.create_index(collection_name=probe, index_params=params)
+        client.insert(collection_name=probe, data=[{"text": "测试嵌入功能"}])
+        client.flush(collection_name=probe)
+        client.load_collection(collection_name=probe)
+        rows = client.query(
+            collection_name=probe,
+            filter="id >= 0",
+            output_fields=["text", "vector"],
+            limit=1,
+        )
+        if not rows:
+            log.info("✗ 插入后查询无结果")
+            log.info(_embedding_troubleshooting(cfg))
+            return False
+        vec = rows[0].get("vector") or []
+        if len(vec) != cfg.milvus.embedding_dim:
+            log.info(
+                f"✗ 维度不匹配：实际 {len(vec)}，配置 {cfg.milvus.embedding_dim}"
+            )
+            log.info(_embedding_troubleshooting(cfg))
+            return False
+        log.info(
+            f"✓ 嵌入链路正常：provider={cfg.milvus.embedding_provider}, "
+            f"model={cfg.milvus.embedding_model}, 维度={len(vec)}"
+        )
+        return True
+    except Exception as e:
+        log.info(f"✗ 嵌入链路失败: {e}")
+        log.info(_embedding_troubleshooting(cfg))
+        return False
+    finally:
+        if client is not None:
+            try:
+                if client.has_collection(collection_name=probe):
+                    client.drop_collection(collection_name=probe)
+                    log.info(f"✓ 已清理临时集合 {probe}")
+            except Exception:
+                log.info(f"⚠ 临时集合 {probe} 清理失败，请手动删除")
+            try:
+                client.close()
+            except Exception:
+                pass

@@ -92,7 +92,8 @@ MD 才能解析出完整的 `author / year / title` 元数据。
 - `text_dense_emb`：`provider=dashscope, model=text-embedding-v3`，生成稠密向量；
 - `text_bm25_emb`：BM25 生成稀疏向量。
 
-因此 **DashScope 密钥只需配置在 Milvus 服务端**（容器/服务环境变量），运行 `kb` 的电脑
+因此 **DashScope 密钥只需配置在 Milvus 服务端**（容器环境变量
+`MILVUSAI_DASHSCOPE_API_KEY`，或 `deploy/user.yaml` 的 `credential`），运行 `kb` 的电脑
 不需要 `DASHSCOPE_API_KEY`。`kb_config.toml` 中的 `embedding_provider / embedding_model /
 embedding_dim` 决定建集合时的向量配置。
 
@@ -124,15 +125,72 @@ SQLite 状态库（默认 `<根>/.kb/state.db`）记录每个文件的路径、h
 
 ### 1. 准备 Milvus
 
-需要 Milvus 2.6+（向量化依赖 Collection Function）。用官方镜像启动即可，注意把 DashScope
-密钥配在 Milvus 服务端：
+需要 Milvus 2.6+（向量化依赖 Collection Function）。**已实测 Milvus 2.6.14；
+Milvus 3.x 尚未实测**（pymilvus 已按 3.0 API 适配，但 Milvus 3.x 服务端需另行验证）。
+
+官方 v2.6.x 容器不能只用一条 `docker run` 启动：镜像 `Cmd=null`，必须显式执行
+`milvus run standalone`，并且要启用内嵌 etcd（默认配置会去连外部 etcd，导致反复
+`connection refused`）。仓库已提供一键配置：
+
+```text
+deploy/
+├── milvus-standalone.yml   # docker compose（已包含所有必需 env / CMD）
+├── embedEtcd.yaml          # 内嵌 etcd 配置
+└── user.yaml               # DashScope 自定义端点模板（默认全注释）
+scripts/
+├── start-milvus.ps1        # Windows
+└── start-milvus.sh         # macOS / Linux
+```
+
+启动步骤：
+
+```powershell
+# 1. 设置 Milvus 侧密钥（注意变量名是 MILVUSAI_DASHSCOPE_API_KEY，不是 DASHSCOPE_API_KEY）
+$env:MILVUSAI_DASHSCOPE_API_KEY = "sk-xxx"
+
+# 2. 国内网络可先拉镜像并改名（可选）
+docker pull daocloud.io/milvusdb/milvus:v2.6.14
+docker tag daocloud.io/milvusdb/milvus:v2.6.14 milvusdb/milvus:v2.6.14
+
+# 3. 启动
+scripts\start-milvus.ps1
+```
+
+macOS / Linux 把第 1 步换成 `export MILVUSAI_DASHSCOPE_API_KEY=sk-xxx`，第 3 步换成
+`./scripts/start-milvus.sh`。脚本内部执行的是与 `deploy/milvus-standalone.yml` 等价的
+docker compose 命令；也可以直接：
 
 ```bash
-# 示例：Docker 单机启动（生产部署请参考 Milvus 官方文档）
-docker run -d --name milvus -p 19530:19530 \
-  -e DASHSCOPE_API_KEY=sk-xxx \
-  milvusdb/milvus:v2.6.14
+docker compose -f deploy/milvus-standalone.yml up -d
 ```
+
+与脚本等价的 `docker run`（排障/复现用）：
+
+```powershell
+docker run -d --name milvus --security-opt seccomp:unconfined `
+  -e ETCD_USE_EMBED=true -e ETCD_DATA_DIR=/var/lib/milvus/etcd `
+  -e ETCD_CONFIG_PATH=/milvus/configs/embedEtcd.yaml `
+  -e COMMON_STORAGETYPE=local -e DEPLOY_MODE=STANDALONE `
+  -e "MILVUSAI_DASHSCOPE_API_KEY=sk-xxx" `
+  -v <你的目录>\volumes\milvus:/var/lib/milvus `
+  -v <你的目录>\embedEtcd.yaml:/milvus/configs/embedEtcd.yaml `
+  -v <你的目录>\user.yaml:/milvus/configs/user.yaml `
+  -p 19530:19530 -p 9091:9091 -p 2379:2379 `
+  milvusdb/milvus:v2.6.14 milvus run standalone
+```
+
+**DashScope 端点（重要）**
+
+- 默认场景：只设置 `MILVUSAI_DASHSCOPE_API_KEY` 即可。
+- 阿里云 MaaS 自定义端点：编辑 `deploy/user.yaml` 取消注释。Milvus 2.6 的 DashScope
+  provider 走**原生接口**，`url` 必须是
+  `https://<你的端点>/api/v1/services/embeddings/text-embedding/text-embedding`，
+  不能填 OpenAI 兼容的 `compatible-mode/v1` 地址，否则报 `404 Not Found` 或
+  `text:[1], embedding:[0]`。
+- 这与 `kb` 本机云端 OCR 用的 `DASHSCOPE_API_KEY` + `[cloud_ocr.openai] base_url`
+  （compatible-mode）是**两组不同的配置**，不要混淆。
+
+配置好后可运行 `kb doctor --deep` 做端到端嵌入体检（临时集合，自动清理）。
 
 如果已有 Milvus（例如旧 KB-Vectorize 部署），直接复用即可；程序只创建自己缺失的集合，
 不会改动已有集合结构。
@@ -145,18 +203,43 @@ docker run -d --name milvus -p 19530:19530 \
 
 ```bash
 # 核心：向量化导入 + Zotero 同步 + 去重（体积小，任何用法都需要）
-pip install "kbimporter-0.2.0-py3-none-any.whl[import,sync,dedupe]"
+pip install "kbimporter-0.3.0-py3-none-any.whl[import,sync,dedupe]"
 # 之后按 OCR 方案补装：
-pip install "kbimporter-0.2.0-py3-none-any.whl[convert]"   # 本地引擎（Marker/MarkItDown，较重）
-pip install "kbimporter-0.2.0-py3-none-any.whl[cloud]"     # 云端 OCR（PaddleOCR/百度/OpenAI）
+pip install "kbimporter-0.3.0-py3-none-any.whl[ocr]"       # 本地引擎（Marker/MarkItDown，较重）
+pip install "kbimporter-0.3.0-py3-none-any.whl[cloud]"     # 云端 OCR（PaddleOCR/百度/OpenAI）
 ```
 
 发行包本身不捆绑第三方依赖，extras 按需安装：`[import]`（向量化）、`[sync]`（Zotero
-同步）、`[convert]`（本地转换，含 marker-pdf 与 markitdown，会拉入 PyTorch，较重）、
+同步）、`[ocr]`（本地转换，含 marker-pdf 与 markitdown，会拉入 PyTorch/opencv/
+onnxruntime，体积 GB 级；`[convert]` 是它的旧别名）、
 `[cloud]`（云端 OCR 客户端）、`[dedupe]`（去重）、`[search]`（检索，与 `[import]`
-共用 pymilvus）。不想挑选时也可以用 `[all]` 一次装齐，但会包含上述重型依赖；若已发布
-到 PyPI，把 `[...]` 前的发行包名换成 `kbimporter` 即可，如
+共用 pymilvus）。`markitdown` 还会传递安装 `magika -> onnxruntime`，体积不小；只做
+PDF 本地 OCR 时也可以只装 `marker-pdf`（`pip install marker-pdf`），不装 markitdown。
+不想挑选时也可以用 `[all]` 一次装齐，但它包含 `[ocr]` 的全部重型依赖；若已发布到
+PyPI，把 `[...]` 前的发行包名换成 `kbimporter` 即可，如
 `pip install "kbimporter[import,sync,dedupe]"`。
+
+**国内网络加速（PyPI / Docker Hub）**
+
+PyPI 长时间无进展时切换阿里云镜像：
+
+```bash
+pip install -i https://mirrors.aliyun.com/pypi/simple/ "kbimporter[import,sync,dedupe]"
+# 或设置全局默认源：
+$env:PIP_INDEX_URL = "https://mirrors.aliyun.com/pypi/simple/"   # Windows
+export PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/      # macOS / Linux
+```
+
+Docker Hub 直连超时时，先拉镜像再改名，然后照常启动：
+
+```bash
+docker pull daocloud.io/milvusdb/milvus:v2.6.14
+docker tag daocloud.io/milvusdb/milvus:v2.6.14 milvusdb/milvus:v2.6.14
+# 或直接用 compose 的镜像变量（无需改名）：
+$env:MILVUS_IMAGE = "daocloud.io/milvusdb/milvus:v2.6.14"   # Windows
+export MILVUS_IMAGE=daocloud.io/milvusdb/milvus:v2.6.14      # macOS / Linux
+docker compose -f deploy/milvus-standalone.yml up -d
+```
 
 从源码安装（推荐，含 `kb setup` 引导）：
 
@@ -171,7 +254,25 @@ python -m venv .venv
 ```
 
 `kb setup` 会先询问显卡与 OCR 方案，再按方案自动安装对应 extras：本地/混合方案加装
-`[convert]`，云端/混合方案加装 `[cloud]`，不再默认安装 `[all]`。
+`[ocr]`，云端/混合方案加装 `[cloud]`，不再默认安装 `[all]`。
+
+**全局命令（任意目录执行 `kb`）**
+
+`kb` 安装后会把可执行文件放进虚拟环境的 `Scripts`（Windows）或 `bin`（macOS/Linux）：
+
+- Windows：把 `.venv\Scripts` 加入 PATH；或直接把
+  `.venv\Scripts\kb.exe` 复制到 `%APPDATA%\Microsoft\Windows\Start Menu\Programs` 之外的
+  任意 PATH 目录。
+- 配置查找顺序：`--config` > 环境变量 `KB_CONFIG` > 当前目录 `kb_config.toml` >
+  项目根 > `%APPDATA%\kbimporter\kb_config.toml`（macOS/Linux 为
+  `~/.config/kbimporter/kb_config.toml`）。
+- 全局使用建议：`kb init --root D:\知识库 --output "$env:APPDATA\kbimporter\kb_config.toml"`
+  后设置 `KB_CONFIG` 指向该文件，任何目录直接 `kb status` 都能读到。
+
+**Windows GBK 控制台乱码**
+
+`kb_config.toml` 和日志是 UTF-8；GBK 控制台看注释会乱码，先执行 `chcp 65001` 再查看。
+程序本身在启动时会尝试把 stdout/stderr 切到 UTF-8，命令输出不受影响。
 
 ### 3. 安装外部 OCR 引擎（按需）
 
@@ -180,14 +281,14 @@ python -m venv .venv
 `.venv\Scripts\pip install ...`，macOS/Linux 下使用 `.venv/bin/pip install ...`；
 MinerU 依赖更复杂，建议单独建 conda 环境（见下）。
 
-- Marker（文字版 PDF，CPU 可跑）：装 `[convert]` extra 即可
-  （`.venv\Scripts\pip install -e ".[convert]"`，macOS/Linux 同理）；它体积较大
+- Marker（文字版 PDF，CPU 可跑）：装 `[ocr]` extra 即可
+  （`.venv\Scripts\pip install -e ".[ocr]"`，macOS/Linux 同理）；它体积较大
   （含 PyTorch），只用云端 OCR 或 MinerU 时可以不装
 - MinerU（扫描件/公式，推荐 GPU）：
   `conda create -n mineru_env python=3.10 && conda activate mineru_env && pip install mineru`；
   国内网络可先设置 `MINERU_MODEL_SOURCE=modelscope`；它装在自己的 conda 环境中，
   程序通过 `[converter].mineru_cmd` 找到该环境的 `mineru` 命令即可
-- MarkItDown（Word/PPT/Excel/EPUB 等非 PDF）：`[convert]` 已包含；也可以单独安装
+- MarkItDown（Word/PPT/Excel/EPUB 等非 PDF）：`[ocr]` 已包含；也可以单独安装
   （`.venv\Scripts\pip install markitdown`，macOS/Linux：`.venv/bin/pip install markitdown`）
 - 云端 OCR：无需安装引擎，只需设置 API 密钥（见“如何选择本地/云端 OCR”）
 
@@ -324,9 +425,20 @@ kb search --collection academic_library --kind dense "你的问题"
 
 1. 安装并打开 Cherry Studio，在“设置 -> 模型服务”里配置好要使用的模型
    （DeepSeek、Qwen、GPT 等均可）。
-2. 配置 Milvus MCP：进入“设置 -> MCP 服务器 -> 添加服务器”，使用 Milvus MCP Server
-   （GitHub: `zilliztech/mcp-server-milvus`，PyPI: `mcp-server-milvus`），按该仓库
-   README 的启动方式配置 Milvus 地址（如 `http://localhost:19530`），无认证可留空。
+2. 配置 Milvus MCP（Windows 实测可用）：
+   - 先启动 Milvus（`scripts\start-milvus.ps1`），MCP 进程连不上 Milvus 会立即退出，
+     Cherry Studio 会报 `Connection closed (-32000)`。
+   - 安装并**锁版本**：当前 `mcp-server-milvus 0.1.1.dev9` 与 `mcp>=2` 不兼容
+     （报 `ModuleNotFoundError: mcp.server.fastmcp`），必须装：
+     ```bash
+     pip install "mcp-server-milvus==0.1.1.dev9" "mcp<2"
+     ```
+   - 进入 Cherry Studio“设置 -> MCP 服务器 -> 添加服务器”，命令填完整路径
+     （注意 CLI 参数是**下划线** `--milvus_uri`，不是官方 README 的 `--milvus-uri`）：
+     ```text
+     C:\Users\<你>\miniconda3\envs\<环境>\Scripts\mcp-server-milvus.exe --milvus_uri http://localhost:19530
+     ```
+   - 无认证可留空；添加成功后工具列表会出现 `milvus_*` 工具。
 3. 新建助手（Agent）：把 `agents/academic_advisor.md`（学术写作顾问）或
    `agents/fieldwork_analyst.md`（田野调查数据分析师）的全文粘贴到“系统提示词”中。
    这两个文件就是现成的 Agent 范例，来自 KB-Vectorize。
@@ -336,8 +448,9 @@ kb search --collection academic_library --kind dense "你的问题"
    dense|bm25|query <词>` 的用法写进系统提示词，让 Agent 通过命令行完成同样的检索
    （见 `agents/README.md`）。
 
-> Cherry Studio 的 MCP 安装方式随版本略有差异，以软件内“MCP 服务器”面板提示为准；
-> Milvus MCP 的具体启动命令见 `zilliztech/mcp-server-milvus` 的 README。
+> Cherry Studio 的 MCP 安装方式随版本略有差异，以软件内“MCP 服务器”面板提示为准。
+> `mcp-server-milvus` 当前仍是 dev 版本，如上游发布稳定版，请跟进更新并同步检查
+> `mcp` 依赖的版本约束。
 
 ### 常用命令
 
@@ -346,7 +459,7 @@ kb search --collection academic_library --kind dense "你的问题"
 | `kb help` / `kb help import` | 查看帮助 |
 | `kb init --root <路径>` | 生成配置与目录 |
 | `kb status` | 知识库与增量状态（只读） |
-| `kb doctor` | 环境体检（只读） |
+| `kb doctor` | 环境体检（只读）；`--deep` 做端到端嵌入体检（临时集合，写操作） |
 | `kb setup` | 安装引导 |
 | `kb scan [--state-only|--milvus-only]` | 扫描状态库与 Milvus（只读） |
 | `kb sync-zotero [--dry-run]` | 同步 Zotero 文献 |
@@ -398,8 +511,9 @@ setx DASHSCOPE_API_KEY "sk-..."                # OpenAI 兼容云端 OCR
 
 设置后**重新打开终端**，再运行 `kb doctor` 或 `kb ocr keys` 验证。
 
-注意区分两个密钥的用途：Milvus 服务端的 `DASHSCOPE_API_KEY` 负责向量化嵌入；本机环境变量
-中的 `DASHSCOPE_API_KEY` 只在选择 `openai` 云端 OCR 时才需要。
+注意区分两个密钥的用途：Milvus 服务端的 `MILVUSAI_DASHSCOPE_API_KEY`（或
+`deploy/user.yaml` 的 credential）负责向量化嵌入；本机环境变量中的 `DASHSCOPE_API_KEY`
+只在选择 `openai` 云端 OCR 时才需要。
 
 ### 风险与预演
 

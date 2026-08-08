@@ -27,7 +27,8 @@ def _posix(p: Path) -> str:
     return str(p).replace("\\", "/")
 
 
-def test_load_config_derives_paths(tmp_path: Path):
+def test_load_config_derives_paths(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("KB_ROOT", raising=False)
     _write_toml(tmp_path / "kb_config.toml", _posix(tmp_path / "kb"))
     cfg = load_config(tmp_path / "kb_config.toml")
     assert cfg.kb_root == tmp_path / "kb"
@@ -38,6 +39,16 @@ def test_load_config_derives_paths(tmp_path: Path):
     assert cfg.milvus.host == "10.0.0.1"
     assert cfg.milvus.batch_size == 7
     assert cfg.max_per_batch == 5
+
+
+def test_load_config_discovers_via_kb_config_env(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("KB_ROOT", raising=False)
+    p = tmp_path / "kb_config.toml"
+    _write_toml(p, _posix(tmp_path / "kb"))
+    monkeypatch.setenv("KB_CONFIG", str(p))
+    cfg = load_config()
+    assert cfg.kb_root == tmp_path / "kb"
+    assert cfg.config_path == p
 
 
 def test_load_config_overrides_sections(tmp_path: Path):

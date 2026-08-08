@@ -7,6 +7,7 @@ from kbimporter.cli import main
 
 def test_cli_init_creates_config(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("KB_ROOT", raising=False)
     rc = main(["init", "--root", str(tmp_path / "知识库"), "--output", "kb_config.toml"])
     assert rc == 0
     cfg_file = tmp_path / "kb_config.toml"

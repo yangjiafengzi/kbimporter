@@ -1,0 +1,16 @@
+# Milvus 侧 DashScope 配置模板（可选）。
+# 默认场景：只需设置环境变量 MILVUSAI_DASHSCOPE_API_KEY，本文件保持全注释即可。
+# 使用阿里云 MaaS 自定义端点时，取消注释并修改：
+#   - url 必须是 DashScope 原生 embeddings 地址（不是 OpenAI 兼容地址）：
+#     https://<你的端点>/api/v1/services/embeddings/text-embedding/text-embedding
+#   - credential 优先级高于环境变量，取消注释后以本文件为准。
+#
+# credential:
+#   dashscope_key:
+#     apikey: sk-xxx
+# function:
+#   textEmbedding:
+#     providers:
+#       dashscope:
+#         credential: dashscope_key
+#         url: https://<你的端点>/api/v1/services/embeddings/text-embedding/text-embedding

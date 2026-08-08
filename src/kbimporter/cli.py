@@ -122,7 +122,7 @@ def _config(args) -> "Config":
 
 
 def cmd_init(args):
-    out = Path(args.output) if args.output else Path(DEFAULT_CONFIG_FILE)
+    out = Path(args.output).resolve() if args.output else Path(DEFAULT_CONFIG_FILE).resolve()
     if out.exists() and not args.force:
         print(f"配置文件已存在: {out}（使用 --force 覆盖）")
         return 1
@@ -141,6 +141,7 @@ def cmd_init(args):
     toml_root = kb_root.replace("\\", "/") if kb_root else ""
     out.write_text(DEFAULT_CONFIG_TEMPLATE.format(kb_root=toml_root), encoding="utf-8")
     print(f"已生成配置模板: {out}")
+    print(f"提示: 全局使用请设置环境变量 KB_CONFIG={out}，之后可在任意目录运行 kb 命令")
     print("请编辑 [paths].kb_root 等路径，并通过环境变量提供 API 密钥。")
     if gpu is not None:
         import logging
@@ -153,6 +154,9 @@ def cmd_init(args):
 def cmd_status(args):
     cfg = _config(args)
     log = setup_logging()
+    if cfg.config_path is None:
+        print("提示: 未找到配置文件（查找顺序: --config > KB_CONFIG > 当前目录 > "
+              "项目根 > %APPDATA%\\kbimporter）")
     root = cfg.kb_root
     print(f"知识库根目录: {root or '(未设置 KB_ROOT / [paths].kb_root)'}")
     for label, path in (
@@ -234,7 +238,7 @@ def cmd_doctor(args):
     cfg = _config(args)
     log = setup_logging()
     from kbimporter.doctor import run_doctor
-    run_doctor(cfg, logger=log)
+    run_doctor(cfg, logger=log, deep=args.deep)
     return 0
 
 
@@ -250,17 +254,8 @@ def cmd_help(args):
 
 
 def _project_config_path(cfg) -> Path | None:
-    candidates: list[Path] = []
-    if cfg.config_path and cfg.config_path.exists():
-        candidates.append(cfg.config_path)
-    cwd_file = Path(DEFAULT_CONFIG_FILE)
-    if cwd_file.exists() and cwd_file not in candidates:
-        candidates.append(cwd_file)
-    root = Path(__file__).resolve().parents[2]
-    p = root / DEFAULT_CONFIG_FILE
-    if p.exists() and p not in candidates:
-        candidates.append(p)
-    return candidates[0] if candidates else None
+    from kbimporter.config import discover_config_path
+    return discover_config_path(cfg.config_path)
 
 
 def _key_envs(provider: str) -> list[str]:
@@ -354,9 +349,45 @@ def cmd_ocr_disable(args):
 def cmd_ocr_keys(args):
     for provider in ("paddle", "baidu", "openai"):
         envs = _key_envs(provider)
-        status = "、".join(f"{k}:{'✓' if os.environ.get(k) else '✗'}" for k in envs)
-        print(f"{provider}: {status}")
+        for k in envs:
+            scopes = _env_scopes(k)
+            status = (
+                f"进程:{'✓' if scopes['process'] else '✗'} "
+                f"用户:{'✓' if scopes['user'] else '✗'} "
+                f"系统:{'✓' if scopes['machine'] else '✗'}"
+            )
+            print(f"{provider} {k}: {status}")
+            if not scopes["process"] and (scopes["user"] or scopes["machine"]):
+                print(f"  提示: {k} 已在用户/系统作用域检测到，请重开终端生效，"
+                      f"或先运行 $env:{k}='<你的key>'")
     return 0
+
+
+def _env_scopes(name: str) -> dict[str, bool]:
+    """检查环境变量在进程 / Windows 用户 / Windows 系统三个作用域是否存在。"""
+    scopes = {"process": bool(os.environ.get(name)), "user": False, "machine": False}
+    if os.name != "nt":
+        return scopes
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
+            try:
+                winreg.QueryValueEx(key, name)
+                scopes["user"] = True
+            except FileNotFoundError:
+                pass
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ) as key:
+            try:
+                winreg.QueryValueEx(key, name)
+                scopes["machine"] = True
+            except FileNotFoundError:
+                pass
+    except Exception:
+        pass
+    return scopes
 
 
 def cmd_scan(args):
@@ -388,23 +419,26 @@ def cmd_dedupe(args):
 def cmd_search(args):
     cfg = _config(args)
     log = setup_logging()
-    from kbimporter.models import connect
-    connect(cfg)
-    from pymilvus import Collection
-    coll = Collection(args.collection)
-    coll.load()
+    from kbimporter.models import get_client
+    client = get_client(cfg)
+    coll_name = args.collection
+    if not client.has_collection(collection_name=coll_name):
+        print(f"集合不存在: {coll_name}")
+        return 2
+    client.load_collection(collection_name=coll_name)
     output_fields = ["text", "source_file", "granularity", "parent_id", "chunk_index"]
     extra = {
         "academic_library": ["author", "year", "title", "language"],
         "fieldwork_kb": ["project_name", "source_type", "location"],
-    }.get(args.collection, ["project_name", "author", "year", "title"])
+    }.get(coll_name, ["project_name", "author", "year", "title"])
     output_fields += [f for f in extra if f not in output_fields]
     if args.kind == "query":
         if not args.filter:
             print("query 模式需要 --filter")
             return 2
-        results = coll.query(
-            expr=args.filter,
+        results = client.query(
+            collection_name=coll_name,
+            filter=args.filter,
             output_fields=output_fields,
             limit=args.limit,
         )
@@ -415,29 +449,32 @@ def cmd_search(args):
                     print(f"{k}: {r[k]}")
         return 0
     if args.kind == "bm25":
-        results = coll.search(
+        results = client.search(
+            collection_name=coll_name,
             data=[args.query],
             anns_field="sparse",
-            param={"metric_type": "BM25"},
+            search_params={"metric_type": "BM25"},
             limit=args.limit,
             output_fields=output_fields,
-            filter=args.filter or None,
+            filter=args.filter or "",
         )
     else:
-        results = coll.search(
+        results = client.search(
+            collection_name=coll_name,
             data=[args.query],
             anns_field="vector",
-            param={"metric_type": "IP"},
+            search_params={"metric_type": "IP"},
             limit=args.limit,
             output_fields=output_fields,
-            filter=args.filter or None,
+            filter=args.filter or "",
         )
     for i, hit in enumerate(results[0], 1):
         print("=" * 60)
-        print(f"[{i}] 相似度: {hit.distance:.4f}")
+        print(f"[{i}] 相似度: {hit.get('distance', 0.0):.4f}")
+        entity = hit.get("entity", {})
         for k in output_fields:
-            if k in hit.entity:
-                print(f"{k}: {hit.entity[k]}")
+            if k in entity:
+                print(f"{k}: {entity[k]}")
     return 0
 
 
@@ -504,8 +541,10 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--config", "-c")
     pk.set_defaults(func=cmd_ocr_keys)
 
-    p = sub.add_parser("doctor", help="扫描本机依赖/引擎/密钥/Milvus（只读）")
+    p = sub.add_parser("doctor", help="扫描本机依赖/引擎/密钥/Milvus（默认只读）")
     p.add_argument("--config", "-c")
+    p.add_argument("--deep", action="store_true",
+                   help="端到端嵌入体检：临时创建并删除 _probe_kbimporter 集合（写操作）")
     p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("scan", help="扫描状态文件与 Milvus 库（只读）")

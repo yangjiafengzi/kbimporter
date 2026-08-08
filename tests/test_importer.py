@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kbimporter import importer, scanner
+from kbimporter import importer, models, scanner
 from kbimporter.config import Config
 
 
@@ -25,7 +25,7 @@ class FakeColl:
     def insert(self, rows):
         start = len(self.inserted) + 1
         self.inserted.extend(rows)
-        return types.SimpleNamespace(primary_keys=list(range(start, start + len(rows))))
+        return list(range(start, start + len(rows)))
 
     def delete(self, expr: str):
         self.deleted.append(expr)
@@ -111,6 +111,13 @@ def test_source_rel_path_cross_platform():
     assert importer._source_rel_path("/other/a.md", root) == "/other/a.md"
 
 
+def test_milvus_error_hint_covers_function_errors():
+    assert "kb doctor --deep" in importer._milvus_error_hint(
+        RuntimeError("check function [text_dense_emb:TextEmbedding] failed: 404 Not Found")
+    )
+    assert importer._milvus_error_hint(RuntimeError("磁盘空间不足")) == ""
+
+
 def test_import_empty_file_marked(cfg: Config, fake_milvus):
     empty = cfg.library_dir / "Empty - 2020 - Nothing.md"
     empty.write_text("   \n  ", encoding="utf-8")
@@ -163,30 +170,25 @@ def test_import_reuses_legacy_state_without_altering_schema(cfg: Config,
 
 
 def test_cleanup_only_drops_empty_project_collections(cfg, monkeypatch):
-    class _FakeColl:
-        def __init__(self, name):
-            self.name = name
-            self._n = 10 if name == "proj_full" else 0
-
-        @property
-        def num_entities(self):
-            return self._n
-
-    class _FakeUtil:
+    class _FakeClient:
         def __init__(self):
             self.dropped = []
 
-        def list_collections(self):
+        def list_collections(self, **kwargs):
             return ["proj_empty", "proj_full"]
 
-        def drop_collection(self, name):
-            self.dropped.append(name)
+        def get_collection_stats(self, collection_name, **kwargs):
+            return {"row_count": 10 if collection_name == "proj_full" else 0}
+
+        def drop_collection(self, collection_name, **kwargs):
+            self.dropped.append(collection_name)
 
     class _FakePymilvus(types.ModuleType):
-        utility = _FakeUtil()
-        Collection = _FakeColl
+        MilvusClient = _FakeClient
 
     monkeypatch.setitem(sys.modules, "pymilvus", _FakePymilvus("pymilvus"))
+    client = _FakeClient()
+    monkeypatch.setattr(models, "get_client", lambda cfg: client)
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """CREATE TABLE file_state (
@@ -200,10 +202,9 @@ def test_cleanup_only_drops_empty_project_collections(cfg, monkeypatch):
         "INSERT INTO file_state VALUES ('/x.md', 'h', 'done', datetime('now'), 'proj_other', 1)"
     )
     conn.commit()
-    fake = sys.modules["pymilvus"]
     dropped = importer._cleanup_empty_project_collections(
         conn, cfg, importer.logging.getLogger("t")
     )
     assert dropped == 1
-    assert fake.utility.dropped == ["proj_empty"]
+    assert client.dropped == ["proj_empty"]
     conn.close()
