@@ -253,3 +253,193 @@ def test_write_cloud_ocr_md(cfg, monkeypatch, tmp_path: Path):
     dest = tmp_path / "out.md"
     assert cloud_ocr.write_cloud_ocr_md(cfg, "doc.pdf", dest) is True
     assert dest.read_text(encoding="utf-8") == "结果文本"
+
+
+def test_mineru_provider_job_flow_with_resume(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="mineru")
+    monkeypatch.setenv("MINERU_API_KEY", "sk-test")
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 2)
+    calls = {"apply": 0, "upload": 0, "poll": 0, "download": 0}
+
+    def fake_apply(cfg_, pdf, log):
+        calls["apply"] += 1
+        return "batch1", "http://example.com/upload"
+
+    def fake_upload(cfg_, pdf, url, log):
+        calls["upload"] += 1
+        assert url == "http://example.com/upload"
+
+    def fake_poll(cfg_, batch_id, log):
+        calls["poll"] += 1
+        return "http://example.com/result.zip"
+
+    def fake_download(cfg_, zip_url, log):
+        calls["download"] += 1
+        return "MinerU 识别全文"
+
+    monkeypatch.setattr(cloud_ocr, "_mineru_apply_upload", fake_apply)
+    monkeypatch.setattr(cloud_ocr, "_mineru_upload", fake_upload)
+    monkeypatch.setattr(cloud_ocr, "_mineru_poll", fake_poll)
+    monkeypatch.setattr(cloud_ocr, "_mineru_download_md", fake_download)
+
+    text = cloud_ocr.ocr_pdf_cloud(cfg, "doc.pdf")
+    assert "MinerU 识别全文" in text
+    text2 = cloud_ocr.ocr_pdf_cloud(cfg, "doc.pdf")
+    assert text2 == text
+    assert calls == {"apply": 1, "upload": 1, "poll": 1, "download": 1}
+
+
+def test_fallback_from_paddle_to_mineru(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="paddle")
+    cfg.cloud_ocr.fallback_providers = ["mineru"]
+    calls = {"paddle": 0, "mineru": 0}
+
+    def fake_paddle(cfg_, pdf, log):
+        calls["paddle"] += 1
+        raise RuntimeError("PaddleOCR 云任务失败")
+
+    def fake_mineru(cfg_, pdf, log):
+        calls["mineru"] += 1
+        return "mineru 结果"
+
+    monkeypatch.setattr(cloud_ocr, "_paddle_ocr_split_job", fake_paddle)
+    monkeypatch.setattr(cloud_ocr, "_mineru_ocr_split_job", fake_mineru)
+    text = cloud_ocr.ocr_pdf_cloud(cfg, "doc.pdf")
+    assert text == "mineru 结果"
+    assert calls == {"paddle": 1, "mineru": 1}
+
+
+def test_all_providers_failed_raises_combined_error(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="paddle")
+    cfg.cloud_ocr.fallback_providers = ["mineru"]
+
+    def fake_paddle(cfg_, pdf, log):
+        raise RuntimeError("paddle 挂了")
+
+    def fake_mineru(cfg_, pdf, log):
+        raise RuntimeError("mineru 挂了")
+
+    monkeypatch.setattr(cloud_ocr, "_paddle_ocr_split_job", fake_paddle)
+    monkeypatch.setattr(cloud_ocr, "_mineru_ocr_split_job", fake_mineru)
+    with pytest.raises(RuntimeError, match="全部失败") as exc:
+        cloud_ocr.ocr_pdf_cloud(cfg, "doc.pdf")
+    assert "paddle: paddle 挂了" in str(exc.value)
+    assert "mineru: mineru 挂了" in str(exc.value)
+
+
+def test_mineru_apply_retries_on_500(cfg, monkeypatch, tmp_path: Path):
+    _enable_cloud(cfg, provider="mineru")
+    monkeypatch.setenv("MINERU_API_KEY", "sk-test")
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"pdf")
+    calls = {"n": 0}
+
+    class Resp:
+        status_code = 500
+        text = "server error"
+
+        def json(self):
+            raise AssertionError("不应解析 JSON")
+
+    def fake_post(*a, **k):
+        calls["n"] += 1
+        return Resp()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    with pytest.raises(RuntimeError, match="已重试"):
+        cloud_ocr._mineru_apply_upload(cfg, pdf, logging.getLogger("t"))
+    assert calls["n"] == 3
+
+
+def test_mineru_provider_retries_failed_job(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="mineru")
+    monkeypatch.setenv("MINERU_API_KEY", "sk-test")
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 2)
+    calls = {"apply": 0, "poll": 0}
+
+    def fake_apply(cfg_, pdf, log):
+        calls["apply"] += 1
+        return f"batch{calls['apply']}", f"http://example.com/upload{calls['apply']}"
+
+    def fake_upload(cfg_, pdf, url, log):
+        pass
+
+    def fake_poll(cfg_, batch_id, log):
+        calls["poll"] += 1
+        if calls["poll"] == 1:
+            raise RuntimeError("MinerU 云任务失败: 服务繁忙")
+        return "http://example.com/result.zip"
+
+    def fake_download(cfg_, zip_url, log):
+        return "mineru 全文"
+
+    monkeypatch.setattr(cloud_ocr, "_mineru_apply_upload", fake_apply)
+    monkeypatch.setattr(cloud_ocr, "_mineru_upload", fake_upload)
+    monkeypatch.setattr(cloud_ocr, "_mineru_poll", fake_poll)
+    monkeypatch.setattr(cloud_ocr, "_mineru_download_md", fake_download)
+
+    text = cloud_ocr.ocr_pdf_cloud(cfg, "doc.pdf")
+    assert text == "mineru 全文"
+    assert calls == {"apply": 2, "poll": 2}
+
+
+def test_mineru_split_job_merges_parts(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="mineru")
+    monkeypatch.setenv("MINERU_API_KEY", "sk-test")
+    cfg.cloud_ocr.mineru.max_pages_per_task = 100
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 250)
+    monkeypatch.setattr(
+        cloud_ocr, "_split_pdf",
+        lambda pdf, out, maxp: [Path("a.pdf"), Path("b.pdf"), Path("c.pdf")],
+    )
+    calls: list[str] = []
+
+    def fake_job(cfg_, p, log):
+        calls.append(p.name)
+        return f"part{len(calls)}"
+
+    monkeypatch.setattr(cloud_ocr, "_mineru_ocr_job", fake_job)
+    text = cloud_ocr._mineru_ocr_split_job(cfg, "big.pdf", logging.getLogger("t"))
+    assert text == "part1\n\npart2\n\npart3"
+    assert calls == ["a.pdf", "b.pdf", "c.pdf"]
+
+
+def test_mineru_job_reuses_completed_checkpoint(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="mineru")
+    state_dir = cloud_ocr._state_dir(cfg, "doc.pdf")
+    cloud_ocr._save_part(state_dir, "0000-0001", "cached md")
+    cloud_ocr._save_checkpoint_mineru(
+        state_dir,
+        {"job_id": "x", "total_pages": 2, "total_units": 1, "done_units": [0]},
+    )
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 2)
+
+    def no_submit(*a, **k):
+        raise AssertionError("不应重新提交")
+
+    monkeypatch.setattr(cloud_ocr, "_mineru_apply_upload", no_submit)
+    text = cloud_ocr._mineru_ocr_job(cfg, "doc.pdf", logging.getLogger("t"))
+    assert text == "cached md"
+
+
+def test_mineru_requires_key(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="mineru")
+    monkeypatch.delenv("MINERU_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="缺少 MinerU 云 API 密钥"):
+        cloud_ocr._mineru_headers(cfg)
+
+
+def test_mineru_dry_run_reports_without_api(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="mineru")
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 150)
+    assert cloud_ocr.ocr_pdf_cloud(cfg, "big.pdf", dry_run=True) is None
+
+
+def test_provider_state_isolation_clears_old_parts(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="mineru")
+    state_dir = cloud_ocr._state_dir(cfg, "doc.pdf")
+    cloud_ocr._save_part(state_dir, "0000-0001", "page 1")
+    cloud_ocr._save_checkpoint(state_dir, 1, 1, ["0000-0001"])
+    cloud_ocr._prepare_provider_state(state_dir, "mineru")
+    assert cloud_ocr._load_checkpoint(state_dir) is None
+    assert not (state_dir / "parts").exists()

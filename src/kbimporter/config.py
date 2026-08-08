@@ -84,13 +84,36 @@ class PaddleCloudOCR:
 
 
 @dataclass
+class MineruCloudOCR:
+    """MinerU 精准解析云 API（mineru.net/apiManage/docs）。
+
+    流程：申请上传链接 -> PUT 上传 PDF -> 轮询批量结果 -> 下载 zip 并取出 full.md。
+    """
+    upload_url: str = "https://mineru.net/api/v4/file-urls/batch"
+    result_url: str = "https://mineru.net/api/v4/extract-results/batch"
+    api_key_env: str = "MINERU_API_KEY"
+    model_version: str = "vlm"  # pipeline / vlm（推荐）/ MinerU-HTML
+    is_ocr: bool = True
+    enable_formula: bool = True
+    enable_table: bool = True
+    language: str = "ch"
+    timeout: int = 120
+    max_retries: int = 3
+    poll_interval: int = 5
+    max_poll_seconds: int = 7200
+    max_pages_per_task: int = 200
+
+
+@dataclass
 class CloudOCRConfig:
     enabled: bool = False
-    provider: str = "paddle"  # paddle（首选，PaddleOCR 云 API） | baidu | openai
+    provider: str = "paddle"  # paddle（首选，PaddleOCR 云 API） | mineru | baidu | openai
+    fallback_providers: list[str] = field(default_factory=list)
     state_dir: Path | None = None
     openai: OpenAICompatibleOCR = field(default_factory=OpenAICompatibleOCR)
     baidu: BaiduOCR = field(default_factory=BaiduOCR)
     paddle: PaddleCloudOCR = field(default_factory=PaddleCloudOCR)
+    mineru: MineruCloudOCR = field(default_factory=MineruCloudOCR)
 
 
 @dataclass
@@ -314,6 +337,10 @@ class Config:
             cfg.cloud_ocr.enabled = bool(cloud["enabled"])
         if cloud.get("provider"):
             cfg.cloud_ocr.provider = str(cloud["provider"])
+        if cloud.get("fallback_providers"):
+            cfg.cloud_ocr.fallback_providers = [
+                str(x) for x in cloud["fallback_providers"]
+            ]
         if cloud.get("state_dir"):
             cfg.cloud_ocr.state_dir = Path(str(cloud["state_dir"]))
         oai = cloud.get("openai", {})
@@ -354,6 +381,20 @@ class Config:
                     "use_chart_recognition"):
             if pdl.get(key) is not None:
                 setattr(cfg.cloud_ocr.paddle, key, bool(pdl[key]))
+
+        mnr = cloud.get("mineru", {})
+        for key in ("upload_url", "result_url", "api_key_env",
+                    "model_version", "language"):
+            if mnr.get(key):
+                setattr(cfg.cloud_ocr.mineru, key, str(mnr[key]))
+        for key, cast in (("timeout", int), ("max_retries", int),
+                          ("poll_interval", int), ("max_poll_seconds", int),
+                          ("max_pages_per_task", int)):
+            if mnr.get(key) is not None:
+                setattr(cfg.cloud_ocr.mineru, key, cast(mnr[key]))
+        for key in ("is_ocr", "enable_formula", "enable_table"):
+            if mnr.get(key) is not None:
+                setattr(cfg.cloud_ocr.mineru, key, bool(mnr[key]))
         return cfg
 
 

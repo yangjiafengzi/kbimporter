@@ -290,14 +290,22 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
                           dry_run: bool, failed_files: list[str],
                           log: logging.Logger,
                           pending_pdfs: list[Path] | None = None,
-                          skip_files: set[Path] | None = None) -> int:
-    """按配置的引擎顺序重试失败的 PDF：marker_single -> mineru -> cloud。"""
+                          skip_files: set[Path] | None = None,
+                          marker_already_batched: bool = False) -> int:
+    """按配置的引擎顺序处理失败的 PDF：marker_single -> mineru -> cloud。
+
+    marker_already_batched=True 且走 pending_pdfs 路径时跳过 marker_single
+    （stage2 的 marker 批处理已经试过这批文件，避免重复）。
+    """
     if pending_pdfs is not None:
         items: list[tuple[Path, Path]] = [
             (pdf.parent.relative_to(scan_dir), pdf) for pdf in pending_pdfs
         ]
         log.info("=" * 50)
-        log.info(f"[阶段3] 直接引擎处理: {len(items)} 个 PDF（未启用 marker 批处理）")
+        log.info(
+            f"[阶段3] 直接引擎处理: {len(items)} 个 PDF"
+            f"（引擎顺序: {' -> '.join(cfg.engines)}）"
+        )
     else:
         lost_pdfs = [f for f in lost_dir.rglob("*.pdf") if f.parent != lost_dir]
         if skip_files:
@@ -333,7 +341,7 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
         for engine in cfg.engines:
             if engine == "marker":
                 # marker 批处理已失败；此处用 marker_single 单文件重试
-                if pending_pdfs is not None:
+                if pending_pdfs is not None and marker_already_batched:
                     continue
                 tmp_out = lost_dir / f"retry_{idx}"
                 tmp_out.mkdir(parents=True, exist_ok=True)
@@ -512,18 +520,25 @@ def run_convert(cfg: Config, dry_run: bool = False,
         return {"total": 0, "markitdown": 0, "pdf": 0, "retry": 0, "failed": 0}
 
     md_success = process_markitdown(markitdown_files, scan_dir, cfg, dry_run, failed_files, log)
-    marker_enabled = "marker" in cfg.engines
+    cloud_first = bool(
+        cfg.cloud_ocr.enabled
+        and cfg.engines
+        and cfg.engines[0] == "cloud"
+        and len(cfg.engines) > 1
+    )
+    marker_enabled = "marker" in cfg.engines and not cloud_first
     if marker_enabled:
         pdf_success = process_pdfs(pdf_files, scan_dir, cfg, dry_run, failed_files, log)
         retry_success = process_retry_engines(
             lost_dir, scan_dir, cfg, dry_run, failed_files, log,
-            skip_files=lost_still_failed,
+            skip_files=lost_still_failed, marker_already_batched=True,
         )
     else:
         pdf_success = 0
         retry_success = process_retry_engines(
             lost_dir, scan_dir, cfg, dry_run, failed_files, log,
             pending_pdfs=pdf_files, skip_files=lost_still_failed,
+            marker_already_batched=not cloud_first,
         )
     pdf_success += lost_retry_success + retry_success
 

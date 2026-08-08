@@ -47,7 +47,7 @@ src/kbimporter/
 ├── importer.py    # 增量导入编排
 ├── zotero_sync.py # Zotero storage -> 文献库
 ├── convert.py     # MarkItDown + marker/mineru/cloud 引擎链
-├── cloud_ocr.py   # 云端 OCR：paddle / baidu / openai（异步任务/分批/断点）
+├── cloud_ocr.py   # 云端 OCR：paddle / mineru / baidu / openai（异步任务/分批/断点/回退链）
 ├── dedupe.py      # 去重/替换/清理
 ├── inspect.py     # 状态文件与 Milvus 集合扫描
 ├── doctor.py      # 环境体检（多 Python 环境探测）
@@ -110,7 +110,8 @@ src/kbimporter/
 ### `[cloud_ocr]`
 
 `enabled`（默认 false，必须显式开启）/ `provider`（`paddle` 首选 /
-`baidu` / `openai`）/ `state_dir`。
+`mineru` / `baidu` / `openai`）/ `fallback_providers`（主 provider 失败后
+依次尝试的备选，如 `["mineru"]`）/ `state_dir`。
 
 #### `[cloud_ocr.paddle]`
 
@@ -128,6 +129,28 @@ max_pages_per_task = 100
 流程：超过 `max_pages_per_task` 页时先按页拆分子 PDF -> 各子任务 multipart 提交 ->
 轮询 jobId -> 下载 JSONL -> 解析 `layoutParsingResults[].markdown.text` ->
 按页缓存并按页序合并。断点续传：已完成子任务不重复提交。
+
+#### `[cloud_ocr.mineru]`
+
+MinerU 精准解析云 API（token 从 `api_key_env` 指定的环境变量读取）：
+
+```toml
+upload_url = "https://mineru.net/api/v4/file-urls/batch"
+result_url = "https://mineru.net/api/v4/extract-results/batch"
+api_key_env = "MINERU_API_KEY"
+model_version = "vlm"   # pipeline / vlm（推荐）/ MinerU-HTML
+is_ocr = true
+enable_formula = true
+enable_table = true
+language = "ch"
+poll_interval = 5
+max_poll_seconds = 7200
+max_pages_per_task = 200
+```
+
+流程：申请上传链接 -> PUT 上传整份 PDF -> 轮询 `extract-results/batch/{batch_id}`
+-> 下载结果 zip 并解出 `full.md`。超过 `max_pages_per_task` 页时自动拆分多个
+子任务，识别完成后按页序合并；断点续传，已完成子任务不重复提交。
 
 #### `[cloud_ocr.baidu]`
 
@@ -186,13 +209,16 @@ kb init --root <知识库路径> [--output <配置路径>] [--interactive] [--fo
 
 ```bash
 kb ocr status
-kb ocr mode local|hybrid|cloud [--provider paddle|baidu|openai]
-kb ocr enable [--provider paddle]
+kb ocr mode local|hybrid [local|cloud]|cloud [--provider paddle|mineru|baidu|openai] [--fallback mineru|none]
+kb ocr enable [--provider paddle] [--fallback mineru]
 kb ocr disable
 kb ocr keys
 ```
 
-写入配置：`converter.engines` 与 `cloud_ocr.enabled/provider`。
+写入配置：`converter.engines` 与 `cloud_ocr.enabled/provider/fallback_providers`。
+`hybrid local` 写入 `engines=["marker","mineru","cloud"]`（本地优先）；
+`hybrid cloud` 写入 `engines=["cloud","marker","mineru"]`（云端优先，云端失败后
+用 marker_single / mineru 本地兜底）。`hybrid` 不带优先级默认本地优先。
 
 ### `kb dedupe`
 

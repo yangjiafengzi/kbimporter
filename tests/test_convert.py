@@ -196,6 +196,85 @@ def test_run_convert_engine_cloud_dry_run(cfg: Config):
     assert stats["pdf"] == 1
 
 
+def test_run_convert_cloud_first_skips_marker_batch(cfg: Config, monkeypatch):
+    d = cfg.project_root / "p"
+    d.mkdir(parents=True)
+    pdf = d / "doc.pdf"
+    pdf.write_bytes(b"pdf")
+    cfg.cloud_ocr.enabled = True
+    cfg.engines = ["cloud", "marker", "mineru"]
+
+    def no_marker_batch(*a, **k):
+        raise AssertionError("云端优先不应先跑 marker 批处理")
+
+    monkeypatch.setattr(convert, "process_pdfs", no_marker_batch)
+    calls: list[str] = []
+
+    def fake_cloud(cfg_, pdf_path, dest_md, dry_run=False, logger=None):
+        calls.append(str(pdf_path))
+        Path(dest_md).write_text("cloud md", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(convert, "write_cloud_ocr_md", fake_cloud)
+    stats = convert.run_convert(cfg, dry_run=False, scan_dir=cfg.scan_dir)
+    assert stats["pdf"] == 1
+    assert (d / "doc.md").read_text(encoding="utf-8") == "cloud md"
+    assert len(calls) == 1
+
+
+def test_retry_engines_cloud_first_falls_back_to_marker_single(cfg: Config, monkeypatch):
+    d = cfg.project_root / "p"
+    d.mkdir(parents=True)
+    pdf = d / "doc.pdf"
+    pdf.write_bytes(b"pdf")
+    cfg.cloud_ocr.enabled = True
+    cfg.engines = ["cloud", "marker"]
+
+    def fake_cloud(cfg_, pdf_path, dest_md, dry_run=False, logger=None):
+        return False
+
+    def fake_run(cmd, timeout):
+        out_dir = Path(cmd[cmd.index("--output_dir") + 1])
+        md = out_dir / "doc" / "doc.md"
+        md.parent.mkdir(parents=True, exist_ok=True)
+        md.write_text("# marker md", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(convert, "write_cloud_ocr_md", fake_cloud)
+    monkeypatch.setattr(convert, "run_with_kill", fake_run)
+    success = convert.process_retry_engines(
+        cfg.ocr_work_dir / "lost", cfg.scan_dir, cfg, dry_run=False,
+        failed_files=[], log=convert.logging.getLogger("t"),
+        pending_pdfs=[pdf],
+    )
+    assert success == 1
+    assert (d / "doc.md").read_text(encoding="utf-8") == "# marker md"
+
+
+def test_retry_engines_skips_marker_when_already_batched(cfg: Config, monkeypatch):
+    d = cfg.project_root / "p"
+    d.mkdir(parents=True)
+    pdf = d / "doc.pdf"
+    pdf.write_bytes(b"pdf")
+    cfg.cloud_ocr.enabled = True
+    cfg.engines = ["cloud", "marker"]
+
+    def fake_cloud(cfg_, pdf_path, dest_md, dry_run=False, logger=None):
+        return False
+
+    def no_marker(*a, **k):
+        raise AssertionError("marker 已批处理过，不应再次运行 marker_single")
+
+    monkeypatch.setattr(convert, "write_cloud_ocr_md", fake_cloud)
+    monkeypatch.setattr(convert, "run_with_kill", no_marker)
+    success = convert.process_retry_engines(
+        cfg.ocr_work_dir / "lost", cfg.scan_dir, cfg, dry_run=False,
+        failed_files=[], log=convert.logging.getLogger("t"),
+        pending_pdfs=[pdf], marker_already_batched=True,
+    )
+    assert success == 0
+
+
 def test_run_with_kill_success():
     assert convert.run_with_kill([sys.executable, "-c", "print('ok')"], timeout=10) == 0
 

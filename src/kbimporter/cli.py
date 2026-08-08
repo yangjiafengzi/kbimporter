@@ -78,6 +78,8 @@ replace_existing_md = "ocr_only"
 # 必须显式 enabled = true 才会启用。
 enabled = false
 provider = "paddle"
+# 主 provider 失败后依次尝试的备选（需要对应密钥）
+fallback_providers = ["mineru"]
 state_dir = ""
 
 [cloud_ocr.paddle]
@@ -91,6 +93,21 @@ max_poll_seconds = 7200
 use_doc_orientation_classify = false
 use_doc_unwarping = false
 use_chart_recognition = false
+
+[cloud_ocr.mineru]
+upload_url = "https://mineru.net/api/v4/file-urls/batch"
+result_url = "https://mineru.net/api/v4/extract-results/batch"
+api_key_env = "MINERU_API_KEY"
+model_version = "vlm"
+is_ocr = true
+enable_formula = true
+enable_table = true
+language = "ch"
+timeout = 120
+max_retries = 3
+poll_interval = 5
+max_poll_seconds = 7200
+max_pages_per_task = 200
 
 [cloud_ocr.openai]
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -261,26 +278,64 @@ def _project_config_path(cfg) -> Path | None:
 def _key_envs(provider: str) -> list[str]:
     return {
         "paddle": ["PADDLE_OCR_API_KEY"],
+        "mineru": ["MINERU_API_KEY"],
         "baidu": ["BAIDU_OCR_API_KEY", "BAIDU_OCR_SECRET_KEY"],
         "openai": ["DASHSCOPE_API_KEY"],
     }.get(provider, [])
 
 
-def _apply_ocr_mode(path: Path, mode: str, provider: str) -> str:
+def _apply_ocr_mode(path: Path, mode: str, provider: str,
+                    fallback_providers: list[str] | None = None,
+                    priority: str | None = None) -> str:
     from kbimporter.config_edit import set_toml_value
     if mode == "local":
         set_toml_value(path, "converter.engines", ["marker", "mineru"])
         set_toml_value(path, "cloud_ocr.enabled", False)
         return "本地模式：marker -> mineru（云端 OCR 关闭）"
+    fallback_providers = fallback_providers or []
+    set_toml_value(path, "cloud_ocr.fallback_providers", fallback_providers)
+    fallback_text = (
+        f"，备选 {' -> '.join(fallback_providers)}"
+        if fallback_providers else ""
+    )
     if mode == "cloud":
         set_toml_value(path, "converter.engines", ["cloud"])
         set_toml_value(path, "cloud_ocr.enabled", True)
         set_toml_value(path, "cloud_ocr.provider", provider)
-        return f"云端模式：全部 PDF 走云端 OCR（provider={provider}）"
-    set_toml_value(path, "converter.engines", ["marker", "mineru", "cloud"])
+        return f"云端模式：全部 PDF 走云端 OCR（provider={provider}{fallback_text}）"
+    priority = priority or "local"
+    engines = (
+        ["cloud", "marker", "mineru"]
+        if priority == "cloud"
+        else ["marker", "mineru", "cloud"]
+    )
+    set_toml_value(path, "converter.engines", engines)
     set_toml_value(path, "cloud_ocr.enabled", True)
     set_toml_value(path, "cloud_ocr.provider", provider)
-    return f"混合模式：marker -> mineru -> cloud（provider={provider}）"
+    label = "云端优先" if priority == "cloud" else "本地优先"
+    return (
+        f"混合模式（{label}）：{' -> '.join(engines)}"
+        f"（provider={provider}{fallback_text}）"
+    )
+
+
+def _resolve_fallback(provider: str, fallback_arg: str | None) -> list[str]:
+    if fallback_arg == "none":
+        return []
+    if fallback_arg:
+        return [fallback_arg]
+    return [] if provider == "mineru" else ["mineru"]
+
+
+def _cloud_key_envs(cfg) -> list[str]:
+    """当前云端 provider 链所需的全部环境变量。"""
+    providers = [cfg.cloud_ocr.provider] + list(cfg.cloud_ocr.fallback_providers or [])
+    envs: list[str] = []
+    for p in providers:
+        for k in _key_envs(p):
+            if k not in envs:
+                envs.append(k)
+    return envs
 
 
 def cmd_ocr_status(args):
@@ -290,14 +345,21 @@ def cmd_ocr_status(args):
         mode = "local"
     elif cfg.engines == ["cloud"]:
         mode = "cloud"
+    elif cfg.engines and cfg.engines[0] == "cloud" and len(cfg.engines) > 1:
+        mode = "hybrid（云端优先）"
+    elif cfg.engines and "cloud" in cfg.engines:
+        mode = "hybrid（本地优先）"
     else:
-        mode = "hybrid"
+        mode = "hybrid（本地优先）"
     print(f"OCR 模式: {mode}")
     print("引擎链: " + " -> ".join(cfg.engines))
+    cloud_chain = " -> ".join(
+        [cloud.provider] + list(cloud.fallback_providers or [])
+    )
     print(f"云端 OCR: {'已启用' if cloud.enabled else '未启用'}"
-          + (f"（provider={cloud.provider}）" if cloud.enabled else ""))
+          + (f"（provider链: {cloud_chain}）" if cloud.enabled else ""))
     if cloud.enabled:
-        envs = _key_envs(cloud.provider)
+        envs = _cloud_key_envs(cfg)
         missing = [k for k in envs if not os.environ.get(k)]
         print("所需密钥: " + ("✓ 已设置" if not missing else "✗ 未设置: " + ", ".join(missing)))
     print(f"配置文件: {cfg.config_path or '未找到'}")
@@ -311,9 +373,16 @@ def cmd_ocr_mode(args):
         print("未找到配置文件，请先运行 `kb init` 生成 kb_config.toml")
         return 1
     provider = args.provider or "paddle"
-    summary = _apply_ocr_mode(path, args.mode, provider)
+    fallback = _resolve_fallback(provider, getattr(args, "fallback", None))
+    summary = _apply_ocr_mode(
+        path, args.mode, provider, fallback,
+        priority=getattr(args, "priority", None),
+    )
     print(f"已切换为{summary}")
-    missing = [k for k in _key_envs(provider) if not os.environ.get(k)]
+    missing = list(dict.fromkeys(
+        k for k in _key_envs(provider) + _key_envs(fallback[0] if fallback else "")
+        if not os.environ.get(k)
+    ))
     if missing:
         print(f"还需设置环境变量: {', '.join(missing)}")
     print("预演: kb convert --dry-run；执行: kb convert")
@@ -327,9 +396,13 @@ def cmd_ocr_enable(args):
         print("未找到配置文件，请先运行 `kb init` 生成 kb_config.toml")
         return 1
     provider = args.provider or "paddle"
-    summary = _apply_ocr_mode(path, "hybrid", provider)
+    fallback = _resolve_fallback(provider, getattr(args, "fallback", None))
+    summary = _apply_ocr_mode(path, "hybrid", provider, fallback)
     print(f"已启用云端 OCR：{summary}")
-    missing = [k for k in _key_envs(provider) if not os.environ.get(k)]
+    missing = list(dict.fromkeys(
+        k for k in _key_envs(provider) + _key_envs(fallback[0] if fallback else "")
+        if not os.environ.get(k)
+    ))
     if missing:
         print(f"还需设置环境变量: {', '.join(missing)}")
     return 0
@@ -347,7 +420,7 @@ def cmd_ocr_disable(args):
 
 
 def cmd_ocr_keys(args):
-    for provider in ("paddle", "baidu", "openai"):
+    for provider in ("paddle", "mineru", "baidu", "openai"):
         envs = _key_envs(provider)
         for k in envs:
             scopes = _env_scopes(k)
@@ -527,11 +600,23 @@ def build_parser() -> argparse.ArgumentParser:
     ps.set_defaults(func=cmd_ocr_status)
     pm = ocr_sub.add_parser("mode", help="切换模式：local（本地）/ hybrid（混合）/ cloud（云端）")
     pm.add_argument("mode", choices=["local", "hybrid", "cloud"])
-    pm.add_argument("--provider", choices=["paddle", "baidu", "openai"], default="paddle")
+    pm.add_argument("priority", nargs="?", choices=["local", "cloud"],
+                    help="hybrid 模式的优先顺序：local=本地优先（默认）/ cloud=云端优先")
+    pm.add_argument("--provider",
+                    choices=["paddle", "mineru", "baidu", "openai"],
+                    default="paddle")
+    pm.add_argument("--fallback",
+                    choices=["paddle", "mineru", "baidu", "openai", "none"],
+                    help="云端 OCR 备选 provider（默认 mineru；none 表示不设备选）")
     pm.add_argument("--config", "-c")
     pm.set_defaults(func=cmd_ocr_mode)
     pe = ocr_sub.add_parser("enable", help="启用云端 OCR（混合模式，本地失败自动云端）")
-    pe.add_argument("--provider", choices=["paddle", "baidu", "openai"], default="paddle")
+    pe.add_argument("--provider",
+                    choices=["paddle", "mineru", "baidu", "openai"],
+                    default="paddle")
+    pe.add_argument("--fallback",
+                    choices=["paddle", "mineru", "baidu", "openai", "none"],
+                    help="云端 OCR 备选 provider（默认 mineru；none 表示不设备选）")
     pe.add_argument("--config", "-c")
     pe.set_defaults(func=cmd_ocr_enable)
     pd = ocr_sub.add_parser("disable", help="关闭云端 OCR（本地模式）")

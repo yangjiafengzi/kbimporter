@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import logging
 import math
@@ -10,6 +11,7 @@ import shutil
 import time
 import urllib.parse
 import urllib.request
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -277,6 +279,7 @@ def _paddle_ocr_job(cfg: Config, pdf_path: str | Path,
                     log: logging.Logger) -> str:
     """PaddleOCR 云端异步任务：提交整份 PDF -> 轮询 -> 下载 JSONL -> 合并。"""
     state_dir = _state_dir(cfg, pdf_path)
+    _prepare_provider_state(state_dir, "paddle")
     cp = _load_checkpoint(state_dir) or {}
     current_total = pdf_page_count(pdf_path)
     if cp.get("kind") == "paddle" and cp.get("total_pages") and \
@@ -325,6 +328,11 @@ def _paddle_ocr_job(cfg: Config, pdf_path: str | Path,
 
 def _clear_paddle_state(state_dir: Path):
     """清除 PaddleOCR 任务的断点与页缓存（用于页数变化后重新处理）。"""
+    _clear_state(state_dir)
+
+
+def _clear_state(state_dir: Path):
+    """清除某个 provider 的断点与页缓存（用于页数变化或 provider 切换后重新处理）。"""
     cp = state_dir / "checkpoint.json"
     try:
         cp.unlink(missing_ok=True)
@@ -333,6 +341,27 @@ def _clear_paddle_state(state_dir: Path):
     parts = state_dir / "parts"
     if parts.exists():
         shutil.rmtree(parts, ignore_errors=True)
+
+
+def _provider_kind(provider: str) -> str:
+    """按页/批请求的 provider（openai/baidu）共用一套断点格式，异步整档任务各自独立。"""
+    if provider in ("openai", "baidu"):
+        return "page"
+    return provider
+
+
+def _prepare_provider_state(state_dir: Path, provider: str):
+    """切换 provider 时清掉旧断点与页缓存，避免不同 API 的结果混用。"""
+    kind = _provider_kind(provider)
+    cp = _load_checkpoint(state_dir)
+    cp_kind = (cp or {}).get("kind")
+    if cp_kind is None:
+        if kind == "page":
+            return  # 旧版 page 断点可继续复用
+        _clear_state(state_dir)
+        return
+    if cp_kind != kind:
+        _clear_state(state_dir)
 
 
 def _split_pdf(pdf_path: str | Path, out_dir: Path, max_pages: int) -> list[Path]:
@@ -393,6 +422,241 @@ def _save_checkpoint_paddle(state_dir: Path, payload: dict):
     tmp.replace(state_dir / "checkpoint.json")
 
 
+# -------------------------------------------------------------- MinerU 云 API
+
+def _mineru_headers(cfg: Config) -> dict:
+    token = os.environ.get(cfg.cloud_ocr.mineru.api_key_env, "")
+    if not token:
+        raise RuntimeError(
+            f"缺少 MinerU 云 API 密钥：请设置环境变量 "
+            f"{cfg.cloud_ocr.mineru.api_key_env}"
+        )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _mineru_apply_upload(cfg: Config, pdf_path: str | Path,
+                         log: logging.Logger) -> tuple[str, str]:
+    """申请 MinerU 文件上传链接，返回 (batch_id, upload_url)。"""
+    requests = _requests()
+    mnr = cfg.cloud_ocr.mineru
+    headers = _mineru_headers(cfg)
+    headers["Content-Type"] = "application/json"
+    payload = {
+        "files": [{
+            "name": Path(pdf_path).name,
+            "data_id": f"kb_{_file_id(pdf_path)}",
+            "is_ocr": mnr.is_ocr,
+        }],
+        "model_version": mnr.model_version,
+        "enable_formula": mnr.enable_formula,
+        "enable_table": mnr.enable_table,
+        "language": mnr.language,
+    }
+    last_err: Exception | None = None
+    for attempt in range(1, mnr.max_retries + 1):
+        try:
+            resp = requests.post(
+                mnr.upload_url, headers=headers, json=payload, timeout=mnr.timeout
+            )
+            data = resp.json() if resp.status_code == 200 else {}
+            if resp.status_code == 200 and data.get("code") == 0:
+                batch_id = data["data"]["batch_id"]
+                urls = data["data"].get("file_urls") or []
+                if not urls:
+                    raise RuntimeError("MinerU 申请上传链接未返回 file_urls")
+                log.info(f"MinerU 已申请上传链接: batch_id={batch_id}")
+                return batch_id, urls[0]
+            last_err = RuntimeError(
+                f"MinerU 申请上传链接失败: {resp.status_code} {resp.text[:300]}"
+            )
+            log.warning(f"  MinerU 申请上传链接第 {attempt} 次失败: {resp.status_code}")
+        except Exception as e:
+            last_err = e
+            log.warning(f"  MinerU 申请上传链接第 {attempt} 次异常: {e}")
+        if attempt < mnr.max_retries:
+            time.sleep(min(2 ** attempt, 30))
+    raise RuntimeError(
+        f"MinerU 申请上传链接失败（已重试 {mnr.max_retries} 次）: {last_err}"
+    )
+
+
+def _mineru_upload(cfg: Config, pdf_path: str | Path, upload_url: str,
+                   log: logging.Logger):
+    """把本地 PDF PUT 到 MinerU 返回的上传链接（无需 Content-Type）。"""
+    requests = _requests()
+    mnr = cfg.cloud_ocr.mineru
+    last_err: Exception | None = None
+    for attempt in range(1, mnr.max_retries + 1):
+        try:
+            with open(pdf_path, "rb") as f:
+                resp = requests.put(upload_url, data=f, timeout=mnr.timeout)
+            if resp.status_code == 200:
+                log.info(f"MinerU 文件上传完成: {Path(pdf_path).name}")
+                return
+            last_err = RuntimeError(
+                f"MinerU 文件上传失败: {resp.status_code} {resp.text[:300]}"
+            )
+            log.warning(f"  MinerU 文件上传第 {attempt} 次失败: {resp.status_code}")
+        except Exception as e:
+            last_err = e
+            log.warning(f"  MinerU 文件上传第 {attempt} 次异常: {e}")
+        if attempt < mnr.max_retries:
+            time.sleep(min(2 ** attempt, 30))
+    raise RuntimeError(
+        f"MinerU 文件上传失败（已重试 {mnr.max_retries} 次）: {last_err}"
+    )
+
+
+def _mineru_poll(cfg: Config, batch_id: str, log: logging.Logger) -> str:
+    """轮询 MinerU 批量解析结果，返回 full_zip_url。"""
+    requests = _requests()
+    mnr = cfg.cloud_ocr.mineru
+    headers = _mineru_headers(cfg)
+    headers["Content-Type"] = "application/json"
+    deadline = time.time() + mnr.max_poll_seconds
+    while time.time() < deadline:
+        resp = requests.get(
+            f"{mnr.result_url}/{batch_id}", headers=headers, timeout=mnr.timeout
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", {})
+        results = data.get("extract_result") or []
+        if not results:
+            time.sleep(mnr.poll_interval)
+            continue
+        item = results[0]
+        state = item.get("state")
+        if state == "done":
+            zip_url = item.get("full_zip_url")
+            if not zip_url:
+                raise RuntimeError("MinerU 任务完成但未返回 full_zip_url")
+            log.info(f"MinerU 任务完成: {item.get('file_name', '')}")
+            return zip_url
+        if state == "failed":
+            raise RuntimeError(
+                f"MinerU 云任务失败: {item.get('err_msg') or item.get('errMsg') or '未知原因'}"
+            )
+        prog = item.get("extract_progress") or {}
+        log.info(
+            f"  MinerU 任务运行中: {prog.get('extracted_pages')}/"
+            f"{prog.get('total_pages')} 页"
+        )
+        time.sleep(mnr.poll_interval)
+    raise RuntimeError("MinerU 云任务超时")
+
+
+def _mineru_download_md(cfg: Config, zip_url: str,
+                        log: logging.Logger) -> str:
+    """下载 MinerU 结果 zip，解出 full.md 并返回 Markdown 文本。"""
+    requests = _requests()
+    mnr = cfg.cloud_ocr.mineru
+    last_err: Exception | None = None
+    for attempt in range(1, mnr.max_retries + 1):
+        try:
+            resp = requests.get(zip_url, timeout=mnr.timeout)
+            resp.raise_for_status()
+            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                md_name = next(
+                    (n for n in zf.namelist() if n.endswith("full.md")), None
+                )
+                if md_name is None:
+                    raise RuntimeError(
+                        f"MinerU 结果压缩包缺少 full.md: {zf.namelist()[:5]}"
+                    )
+                text = zf.read(md_name).decode("utf-8", errors="replace")
+            log.info(f"MinerU 结果下载完成: {md_name}（{len(text)} 字符）")
+            return text
+        except Exception as e:
+            last_err = e
+            log.warning(f"  MinerU 结果下载第 {attempt} 次失败: {e}")
+        if attempt < mnr.max_retries:
+            time.sleep(min(2 ** attempt, 30))
+    raise RuntimeError(
+        f"MinerU 结果下载失败（已重试 {mnr.max_retries} 次）: {last_err}"
+    )
+
+
+def _save_checkpoint_mineru(state_dir: Path, payload: dict):
+    payload["kind"] = "mineru"
+    tmp = state_dir / "checkpoint.json.tmp"
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(state_dir / "checkpoint.json")
+
+
+def _mineru_ocr_job(cfg: Config, pdf_path: str | Path,
+                    log: logging.Logger) -> str:
+    """MinerU 云端任务：申请上传链接 -> 上传 -> 轮询 -> 下载 full.md -> 缓存。"""
+    state_dir = _state_dir(cfg, pdf_path)
+    _prepare_provider_state(state_dir, "mineru")
+    current_total = pdf_page_count(pdf_path)
+    cp = _load_checkpoint(state_dir) or {}
+    if cp.get("kind") == "mineru" and cp.get("total_pages") == current_total and \
+            cp.get("total_units") and len(cp.get("done_units", [])) >= cp["total_units"]:
+        log.info("MinerU 任务已完成，直接合并缓存")
+        return _merge_parts(state_dir, cp["total_units"], 1)
+
+    mnr = cfg.cloud_ocr.mineru
+    last_err: Exception | None = None
+    batch_id = cp.get("job_id") if cp.get("kind") == "mineru" else None
+    for attempt in range(1, mnr.max_retries + 1):
+        if batch_id is None or attempt > 1:
+            batch_id, upload_url = _mineru_apply_upload(cfg, pdf_path, log)
+            _mineru_upload(cfg, pdf_path, upload_url, log)
+            _save_checkpoint_mineru(state_dir, {
+                "job_id": batch_id, "total_pages": current_total,
+                "total_units": 1, "done_units": [],
+            })
+        try:
+            zip_url = _mineru_poll(cfg, batch_id, log)
+            text = _mineru_download_md(cfg, zip_url, log)
+            break
+        except RuntimeError as e:
+            last_err = e
+            log.warning(f"  MinerU 任务第 {attempt} 次失败: {e}")
+            batch_id = None
+    else:
+        raise RuntimeError(
+            f"MinerU 云任务失败（已重试 {mnr.max_retries} 次）: {last_err}。"
+            "可能原因：PDF 加密/损坏、MinerU 服务繁忙、API Key 失效。"
+            "可稍后重试，或换用其他 OCR 引擎（kb ocr mode local）"
+        )
+    _save_part(state_dir, "0000-0001", text)
+    _save_checkpoint_mineru(state_dir, {
+        "job_id": batch_id, "total_pages": current_total,
+        "total_units": 1, "done_units": [0],
+    })
+    return _merge_parts(state_dir, 1, 1)
+
+
+def _mineru_ocr_split_job(cfg: Config, pdf_path: str | Path,
+                          log: logging.Logger) -> str:
+    """MinerU 云端任务：超过单任务页数上限时自动拆分，识别后按子任务顺序合并。"""
+    mnr = cfg.cloud_ocr.mineru
+    total = pdf_page_count(pdf_path)
+    main_state = _state_dir(cfg, pdf_path)
+    cp = _load_checkpoint(main_state) or {}
+    if cp.get("kind") == "mineru" and cp.get("total_pages") == total and \
+            cp.get("total_units") and len(cp.get("done_units", [])) >= cp["total_units"]:
+        log.info("MinerU 任务已完成，直接合并缓存")
+        return _merge_parts(main_state, cp["total_units"], 1)
+    if total <= mnr.max_pages_per_task:
+        return _mineru_ocr_job(cfg, pdf_path, log)
+
+    log.warning(
+        f"MinerU 单任务建议不超过 {mnr.max_pages_per_task} 页；"
+        f"当前 {total} 页，将拆分为多个子任务，识别完成后自动合并"
+    )
+    split_dir = main_state / "split"
+    ensure_dir(split_dir)
+    parts = _split_pdf(pdf_path, split_dir, mnr.max_pages_per_task)
+    texts: list[str] = []
+    for i, sub in enumerate(parts, 1):
+        sub_total = pdf_page_count(sub)
+        log.info(f"  MinerU 子任务 [{i}/{len(parts)}]: {sub.name}（{sub_total} 页）")
+        texts.append(_mineru_ocr_job(cfg, sub, log))
+    return "\n\n".join(t for t in texts if t and t.strip())
+
+
 # ---------------------------------------------------------------- 断点续传
 
 def _unit_parts(total: int, batch_size: int) -> list[tuple[int, int]]:
@@ -421,7 +685,8 @@ def _load_checkpoint(state_dir: Path) -> dict | None:
 def _save_checkpoint(state_dir: Path, total: int, batch_size: int, done: list[str]):
     tmp = state_dir / "checkpoint.json.tmp"
     tmp.write_text(
-        json.dumps({"total": total, "batch_size": batch_size, "done": done},
+        json.dumps({"kind": "page", "total": total,
+                    "batch_size": batch_size, "done": done},
                    ensure_ascii=False, indent=1),
         encoding="utf-8",
     )
@@ -449,56 +714,27 @@ def _merge_parts(state_dir: Path, total: int, batch_size: int) -> str:
 
 # --------------------------------------------------------------------- 主流程
 
-def ocr_pdf_cloud(cfg: Config, pdf_path: str | Path, dry_run: bool = False,
-                  logger: logging.Logger | None = None) -> str | None:
-    """云端 OCR 一个 PDF，返回合并后的 Markdown 文本。
+def _cloud_providers(cfg: Config) -> list[str]:
+    """云端 provider 链：主 provider + fallback_providers（去重）。"""
+    chain = [cfg.cloud_ocr.provider]
+    for p in cfg.cloud_ocr.fallback_providers or []:
+        if p and p not in chain:
+            chain.append(p)
+    return chain
 
-    - 必须通过配置 [cloud_ocr].enabled=true 显式开启（会产生 API 费用）。
-    - 按批处理，断点续传；中断后再次运行不会重复已完成的页。
-    - dry_run 只报告页数与预计请求数，不调用 API。
-    """
-    log = logger or logging.getLogger("kbimporter")
-    if not cfg.cloud_ocr.enabled:
-        raise RuntimeError(
-            "云端 OCR 未启用：请在配置 [cloud_ocr] enabled=true 显式开启"
-            "（风险：付费 API 费用 + 文档图片发送到第三方服务）"
-        )
-    provider = cfg.cloud_ocr.provider
-    if dry_run:
-        if provider == "paddle":
-            try:
-                n = pdf_page_count(pdf_path)
-                pdl = cfg.cloud_ocr.paddle
-                if n > pdl.max_pages_per_task:
-                    n_parts = math.ceil(n / pdl.max_pages_per_task)
-                    log.info(
-                        f"[dry-run] 将拆分 {n} 页为 {n_parts} 个子任务"
-                        f"（每任务 ≤{pdl.max_pages_per_task} 页）提交 PaddleOCR（不调用 API）"
-                    )
-                else:
-                    log.info(
-                        f"[dry-run] 将提交整份 PDF（约 {n} 页）到 PaddleOCR"
-                        " 云端异步任务（不调用 API）"
-                    )
-            except Exception:
-                log.info("[dry-run] 将提交整份 PDF 到 PaddleOCR 云端异步任务（不调用 API）")
-        else:
-            total = pdf_page_count(pdf_path)
-            batch_size = cfg.cloud_ocr.openai.page_batch_size if provider == "openai" else 1
-            units = _unit_parts(total, batch_size)
-            log.info(f"云端 OCR: {Path(pdf_path).name} 共 {total} 页, {len(units)} 次请求, provider={provider}")
-            log.info(f"[dry-run] 预计 {len(units)} 次 API 请求（不会调用）")
-        return None
-    log.warning("云端 OCR 将调用付费 API，并把文档图片发送到第三方服务（配置已显式开启）")
 
-    if provider == "paddle":
-        return _paddle_ocr_split_job(cfg, pdf_path, log)
-
+def _ocr_page_based(cfg: Config, provider: str, pdf_path: str | Path,
+                    log: logging.Logger) -> str:
+    """按页/批请求的 provider（openai/baidu）：渲染页面 -> 请求 -> 断点续传。"""
     total = pdf_page_count(pdf_path)
     batch_size = cfg.cloud_ocr.openai.page_batch_size if provider == "openai" else 1
     units = _unit_parts(total, batch_size)
-    log.info(f"云端 OCR: {Path(pdf_path).name} 共 {total} 页, {len(units)} 次请求, provider={provider}")
+    log.info(
+        f"云端 OCR: {Path(pdf_path).name} 共 {total} 页, "
+        f"{len(units)} 次请求, provider={provider}"
+    )
     state_dir = _state_dir(cfg, pdf_path)
+    _prepare_provider_state(state_dir, provider)
     cp = _load_checkpoint(state_dir)
     if cp and cp.get("total") != total:
         log.info("页数已变化，重置断点")
@@ -518,7 +754,10 @@ def ocr_pdf_cloud(cfg: Config, pdf_path: str | Path, dry_run: bool = False,
             )
         for s, e in pending:
             unit_id = f"{s:04d}-{e:04d}"
-            images = [render_page(pdf_path, i, cfg.cloud_ocr.openai.scale_factor) for i in range(s, e)]
+            images = [
+                render_page(pdf_path, i, cfg.cloud_ocr.openai.scale_factor)
+                for i in range(s, e)
+            ]
             text = _openai_batch(cfg, api_key, images, log)
             _save_part(state_dir, unit_id, text)
             done.add(unit_id)
@@ -551,9 +790,104 @@ def ocr_pdf_cloud(cfg: Config, pdf_path: str | Path, dry_run: bool = False,
         if failures:
             raise RuntimeError(f"百度 OCR 有 {len(failures)} 个批次失败: {failures[:10]}")
     else:
-        raise RuntimeError(f"未知云端 OCR provider: {provider}（可选 openai / baidu）")
-
+        raise RuntimeError(
+            f"未知云端 OCR provider: {provider}（可选 paddle / mineru / openai / baidu）"
+        )
     return _merge_parts(state_dir, total, batch_size)
+
+
+def _run_cloud_provider(cfg: Config, provider: str, pdf_path: str | Path,
+                        log: logging.Logger) -> str:
+    if provider == "paddle":
+        return _paddle_ocr_split_job(cfg, pdf_path, log)
+    if provider == "mineru":
+        return _mineru_ocr_split_job(cfg, pdf_path, log)
+    if provider in ("openai", "baidu"):
+        return _ocr_page_based(cfg, provider, pdf_path, log)
+    raise RuntimeError(
+        f"未知云端 OCR provider: {provider}（可选 paddle / mineru / openai / baidu）"
+    )
+
+
+def ocr_pdf_cloud(cfg: Config, pdf_path: str | Path, dry_run: bool = False,
+                  logger: logging.Logger | None = None) -> str | None:
+    """云端 OCR 一个 PDF，返回合并后的 Markdown 文本。
+
+    - 必须通过配置 [cloud_ocr].enabled=true 显式开启（会产生 API 费用）。
+    - 按 provider 链处理：主 provider 失败后自动尝试 fallback_providers。
+    - 断点续传；中断后再次运行不会重复已完成的页。
+    - dry_run 只报告页数与预计请求数，不调用 API。
+    """
+    log = logger or logging.getLogger("kbimporter")
+    if not cfg.cloud_ocr.enabled:
+        raise RuntimeError(
+            "云端 OCR 未启用：请在配置 [cloud_ocr] enabled=true 显式开启"
+            "（风险：付费 API 费用 + 文档图片发送到第三方服务）"
+        )
+    providers = _cloud_providers(cfg)
+    if dry_run:
+        try:
+            total = pdf_page_count(pdf_path)
+        except Exception:
+            total = None
+        for provider in providers:
+            if provider == "paddle":
+                if total is not None:
+                    pdl = cfg.cloud_ocr.paddle
+                    if total > pdl.max_pages_per_task:
+                        n_parts = math.ceil(total / pdl.max_pages_per_task)
+                        log.info(
+                            f"[dry-run] 将拆分 {total} 页为 {n_parts} 个子任务"
+                            f"（每任务 ≤{pdl.max_pages_per_task} 页）提交 PaddleOCR（不调用 API）"
+                        )
+                    else:
+                        log.info(
+                            f"[dry-run] 将提交整份 PDF（约 {total} 页）到 PaddleOCR"
+                            " 云端异步任务（不调用 API）"
+                        )
+                else:
+                    log.info(
+                        "[dry-run] 将提交整份 PDF 到 PaddleOCR 云端异步任务（不调用 API）"
+                    )
+            elif provider == "mineru":
+                if total is not None:
+                    mnr = cfg.cloud_ocr.mineru
+                    if total > mnr.max_pages_per_task:
+                        n_parts = math.ceil(total / mnr.max_pages_per_task)
+                        log.info(
+                            f"[dry-run] 将拆分 {total} 页为 {n_parts} 个子任务"
+                            f"（每任务 ≤{mnr.max_pages_per_task} 页）提交 MinerU（不调用 API）"
+                        )
+                    else:
+                        log.info(
+                            f"[dry-run] 将上传整份 PDF（约 {total} 页）到 MinerU"
+                            " 云端异步任务（不调用 API）"
+                        )
+                else:
+                    log.info(
+                        "[dry-run] 将上传整份 PDF 到 MinerU 云端异步任务（不调用 API）"
+                    )
+            else:
+                batch_size = (
+                    cfg.cloud_ocr.openai.page_batch_size
+                    if provider == "openai" else 1
+                )
+                units = _unit_parts(total, batch_size) if total else []
+                log.info(
+                    f"[dry-run] provider={provider} 预计 {len(units)} 次 API 请求"
+                    "（不会调用）"
+                )
+        return None
+    log.warning("云端 OCR 将调用付费 API，并把文档图片发送到第三方服务（配置已显式开启）")
+
+    errors: list[str] = []
+    for provider in providers:
+        try:
+            return _run_cloud_provider(cfg, provider, pdf_path, log)
+        except Exception as e:
+            errors.append(f"{provider}: {e}")
+            log.warning(f"云端 OCR provider {provider} 失败，尝试下一个: {e}")
+    raise RuntimeError("云端 OCR 全部失败: " + " | ".join(errors))
 
 
 def write_cloud_ocr_md(cfg: Config, pdf_path: str | Path, dest_md: str | Path,

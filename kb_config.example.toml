@@ -76,7 +76,8 @@ replace_existing_md = "ocr_only"
 # 百度 OCR 按调用次数计费），且会把文档图片发送到第三方服务。
 # 必须在配置中显式 enabled = true 才会启用，默认关闭。
 enabled = false
-provider = "paddle"   # paddle（首选，PaddleOCR 云 API）/ baidu（百度智能云）/ openai（通用兼容接口）
+provider = "paddle"   # paddle（首选，PaddleOCR 云 API）/ mineru / baidu / openai
+fallback_providers = ["mineru"]   # 主 provider 失败后依次尝试的备选（需对应密钥）
 state_dir = ""        # 断点续传状态目录，默认: <state_dir>/cloud_ocr
 
 [cloud_ocr.paddle]
@@ -93,6 +94,22 @@ max_pages_per_task = 100
 use_doc_orientation_classify = false
 use_doc_unwarping = false
 use_chart_recognition = false
+
+[cloud_ocr.mineru]
+# MinerU 精准解析云 API：申请上传链接 -> PUT 上传 -> 轮询 -> 下载 zip 中 full.md
+upload_url = "https://mineru.net/api/v4/file-urls/batch"
+result_url = "https://mineru.net/api/v4/extract-results/batch"
+api_key_env = "MINERU_API_KEY"
+model_version = "vlm"   # pipeline / vlm（推荐）/ MinerU-HTML
+is_ocr = true           # 扫描件启用 OCR；文字版 PDF 可设为 false 节省解析成本
+enable_formula = true
+enable_table = true
+language = "ch"
+timeout = 120
+max_retries = 3
+poll_interval = 5
+max_poll_seconds = 7200
+max_pages_per_task = 200   # 单任务页数上限，超过后自动拆分子任务再合并
 
 [cloud_ocr.openai]
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"

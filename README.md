@@ -203,10 +203,10 @@ docker run -d --name milvus --security-opt seccomp:unconfined `
 
 ```bash
 # 核心：向量化导入 + Zotero 同步 + 去重（体积小，任何用法都需要）
-pip install "kbimporter-0.3.0-py3-none-any.whl[import,sync,dedupe]"
+pip install "kbimporter-0.4.0-py3-none-any.whl[import,sync,dedupe]"
 # 之后按 OCR 方案补装：
-pip install "kbimporter-0.3.0-py3-none-any.whl[ocr]"       # 本地引擎（Marker/MarkItDown，较重）
-pip install "kbimporter-0.3.0-py3-none-any.whl[cloud]"     # 云端 OCR（PaddleOCR/百度/OpenAI）
+pip install "kbimporter-0.4.0-py3-none-any.whl[ocr]"       # 本地引擎（Marker/MarkItDown，较重）
+pip install "kbimporter-0.4.0-py3-none-any.whl[cloud]"     # 云端 OCR（PaddleOCR/MinerU/百度/OpenAI）
 ```
 
 发行包本身不捆绑第三方依赖，extras 按需安装：`[import]`（向量化）、`[sync]`（Zotero
@@ -428,13 +428,19 @@ kb search --collection academic_library --kind dense "你的问题"
 2. 配置 Milvus MCP（Windows 实测可用）：
    - 先启动 Milvus（`scripts\start-milvus.ps1`），MCP 进程连不上 Milvus 会立即退出，
      Cherry Studio 会报 `Connection closed (-32000)`。
-   - 安装并**锁版本**：当前 `mcp-server-milvus 0.1.1.dev9` 与 `mcp>=2` 不兼容
-     （报 `ModuleNotFoundError: mcp.server.fastmcp`），必须装：
+   - **优先从官方仓库下载最新版**：
+     [zilliztech/mcp-server-milvus](https://github.com/zilliztech/mcp-server-milvus)。
+     按其 README 安装（例如 `pip install mcp-server-milvus` 或
+     `uvx mcp-server-milvus`），并以官方文档中的启动参数为准（新版可能是
+     `--milvus-uri`）。
+   - 旧版兼容说明（`0.1.1.dev9` 实测）：该版本与 `mcp>=2` 不兼容
+     （报 `ModuleNotFoundError: mcp.server.fastmcp`），且 CLI 参数是**下划线**
+     `--milvus_uri`。仅当官方最新版不可用/不兼容时才需要锁版本安装：
      ```bash
      pip install "mcp-server-milvus==0.1.1.dev9" "mcp<2"
      ```
    - 进入 Cherry Studio“设置 -> MCP 服务器 -> 添加服务器”，命令填完整路径
-     （注意 CLI 参数是**下划线** `--milvus_uri`，不是官方 README 的 `--milvus-uri`）：
+     （下面以旧版为例，新版请按官方 README 调整参数名）：
      ```text
      C:\Users\<你>\miniconda3\envs\<环境>\Scripts\mcp-server-milvus.exe --milvus_uri http://localhost:19530
      ```
@@ -449,8 +455,8 @@ kb search --collection academic_library --kind dense "你的问题"
    （见 `agents/README.md`）。
 
 > Cherry Studio 的 MCP 安装方式随版本略有差异，以软件内“MCP 服务器”面板提示为准。
-> `mcp-server-milvus` 当前仍是 dev 版本，如上游发布稳定版，请跟进更新并同步检查
-> `mcp` 依赖的版本约束。
+> `mcp-server-milvus` 持续迭代，建议始终从官方仓库获取最新版；如遇到兼容问题，
+> 再参考上面“旧版兼容说明”的锁定方案。
 
 ### 常用命令
 
@@ -478,6 +484,7 @@ kb search --collection academic_library --kind dense "你的问题"
 | 有 NVIDIA 显卡 | 本地 MinerU | 免费、离线、隐私好，扫描件/公式/版面效果好 |
 | 无显卡，PDF 是文字版 | 本地 Marker | 足够快，CPU 也能跑，不花钱 |
 | 无显卡，扫描件/中文/手写 | PaddleOCR 云 API | 中文识别质量好，整本 PDF 异步处理 |
+| 云端想更稳，PaddleOCR 失败时自动切换 | PaddleOCR + MinerU 云端次选 | 主 provider 失败后自动用 MinerU 重试 |
 | 有 API 预算、想换通用视觉模型 | OpenAI 兼容接口（DashScope qwen3-vl-plus） | 可自由换模型 |
 | 离线且敏感 | 本地 MinerU（或本地 Ollama + OpenAI 兼容端点） | 数据不出机器 |
 
@@ -486,24 +493,37 @@ kb search --collection academic_library --kind dense "你的问题"
 ```bash
 kb ocr status                                  # 当前模式/引擎链/密钥
 kb ocr mode local                              # marker -> mineru，不花钱
-kb ocr mode hybrid --provider paddle           # 本地失败后自动云端（推荐）
-kb ocr mode cloud  --provider paddle           # 全部 PDF 走云端
-kb ocr enable --provider paddle                # 等价于 hybrid
+kb ocr mode hybrid local --provider paddle --fallback mineru   # 本地优先，失败后自动云端（推荐）
+kb ocr mode hybrid cloud --provider paddle --fallback mineru   # 云端优先，失败后自动本地
+kb ocr mode cloud     --provider paddle --fallback mineru      # 全部 PDF 走云端
+kb ocr enable --provider paddle --fallback mineru              # 等价于 hybrid local
 kb ocr disable                                 # 关闭云端
 kb ocr keys                                    # 查看各 provider 密钥是否已设置
 ```
+
+混合模式可选本地/云端优先：`hybrid local` 的引擎链是
+`marker -> mineru -> cloud`（本地先试，失败才花钱走云端）；`hybrid cloud` 的引擎链是
+`cloud -> marker -> mineru`（云端先试，云端失败/没启用时再用本地引擎兜底，适合本地
+没有 GPU 但希望优先用云端高精度解析的场景）。`kb ocr mode hybrid` 不带优先级时默认
+本地优先；`kb ocr status` 会显示当前是“云端优先”还是“本地优先”。
 
 `paddle` 是默认云端方案：整份 PDF 提交给 PaddleOCR 云端异步任务（PaddleOCR-VL-1.6），
 服务端分页识别后返回 Markdown；程序轮询进度、下载结果并做本地缓存，中断后不会重复提交
 已完成的任务。超过 100 页的 PDF 会自动拆分为多个子任务（可在 `[cloud_ocr.paddle]`
 的 `max_pages_per_task` 调整），全部识别完成后按页序合并成一份 Markdown，每个子任务
-独立断点续传。`baidu` 与 `openai` 是按页/按批请求，同样带断点续传，适合大文件分批 OCR。
+独立断点续传。`mineru` 是 MinerU 精准解析云 API：先申请上传链接、PUT 上传整份 PDF，
+再轮询 `extract-results/batch/{batch_id}`，下载结果 zip 中的 `full.md`；同样支持超过
+200 页自动拆分子任务（`[cloud_ocr.mineru].max_pages_per_task`）和断点续传。
+`fallback_providers` 可配置回退链（例如 `["mineru"]`），主 provider 失败后会自动尝试
+下一个，云端识别更稳。`baidu` 与 `openai` 是按页/按批请求，同样带断点续传，适合大文件
+分批 OCR。
 
 ### 密钥（只设在本机环境变量，不写配置）
 
 ```powershell
 # PowerShell
 setx PADDLE_OCR_API_KEY "你的token"            # PaddleOCR 云 API（首选）
+setx MINERU_API_KEY "sk-..."                   # MinerU 精准解析云 API（次选）
 setx BAIDU_OCR_API_KEY "你的key"               # 百度智能云
 setx BAIDU_OCR_SECRET_KEY "你的secret"
 setx DASHSCOPE_API_KEY "sk-..."                # OpenAI 兼容云端 OCR

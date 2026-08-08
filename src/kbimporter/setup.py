@@ -150,8 +150,11 @@ def print_engine_guidance(gpu: bool, cfg: Config, log: logging.Logger):
     log.info("开启云端 OCR 的步骤：")
     log.info("  1. 编辑 kb_config.toml，在 [cloud_ocr] 下设置 enabled = true、provider = \"paddle\"")
     log.info("  2. 设置环境变量: set PADDLE_OCR_API_KEY=你的token")
-    log.info("  3. 预演: kb convert --engine cloud --dry-run")
-    log.info("  4. 执行: kb convert")
+    log.info("  3. 可选（更稳定）：设置环境变量 MINERU_API_KEY=你的token，")
+    log.info("     并在 [cloud_ocr] 设置 fallback_providers = [\"mineru\"]，")
+    log.info("     PaddleOCR 失败时自动切换到 MinerU 云端（或用 kb ocr enable --provider paddle --fallback mineru）")
+    log.info("  4. 预演: kb convert --engine cloud --dry-run")
+    log.info("  5. 执行: kb convert")
     log.info("风险提示：云端 OCR 会产生 API 费用，且文档图片会发送到第三方服务；")
     log.info("         必须显式在配置中启用，程序默认关闭。")
 

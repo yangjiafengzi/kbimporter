@@ -127,3 +127,30 @@ model = "PaddleOCR-Test"
     assert loaded.cloud_ocr.provider == "paddle"
     assert loaded.cloud_ocr.paddle.job_url == "https://example.com/api/v2/ocr/jobs"
     assert loaded.cloud_ocr.paddle.model == "PaddleOCR-Test"
+
+
+def test_cloud_ocr_mineru_parse(tmp_path: Path):
+    cfg = Config()
+    assert cfg.cloud_ocr.mineru.api_key_env == "MINERU_API_KEY"
+    assert cfg.cloud_ocr.mineru.model_version == "vlm"
+    cfg_file = tmp_path / "kb_config.toml"
+    cfg_file.write_text(
+        """[paths]
+kb_root = "C:/tmp/kb"
+[cloud_ocr]
+provider = "paddle"
+fallback_providers = ["mineru"]
+[cloud_ocr.mineru]
+api_key_env = "MY_MINERU_KEY"
+model_version = "pipeline"
+is_ocr = false
+max_pages_per_task = 50
+""",
+        encoding="utf-8",
+    )
+    loaded = load_config(cfg_file)
+    assert loaded.cloud_ocr.fallback_providers == ["mineru"]
+    assert loaded.cloud_ocr.mineru.api_key_env == "MY_MINERU_KEY"
+    assert loaded.cloud_ocr.mineru.model_version == "pipeline"
+    assert loaded.cloud_ocr.mineru.is_ocr is False
+    assert loaded.cloud_ocr.mineru.max_pages_per_task == 50

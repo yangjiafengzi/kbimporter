@@ -28,6 +28,7 @@ def test_doctor_scan_returns_structure(cfg, monkeypatch):
     assert "exes" in info
     assert "env_keys" in info
     assert "PADDLE_OCR_API_KEY" in info["env_keys"]
+    assert "MINERU_API_KEY" in info["env_keys"]
     assert info["milvus_reachable"] is False
     assert info["state_db"]["path"] == str(cfg.state_db)
     assert "interpreters" in info

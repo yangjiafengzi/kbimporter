@@ -139,6 +139,7 @@ def scan_environment(cfg: Config) -> dict:
         "BAIDU_OCR_API_KEY": bool(os.environ.get("BAIDU_OCR_API_KEY")),
         "BAIDU_OCR_SECRET_KEY": bool(os.environ.get("BAIDU_OCR_SECRET_KEY")),
         "PADDLE_OCR_API_KEY": bool(os.environ.get("PADDLE_OCR_API_KEY")),
+        "MINERU_API_KEY": bool(os.environ.get("MINERU_API_KEY")),
     }
     try:
         with socket.create_connection(
@@ -160,6 +161,9 @@ def scan_environment(cfg: Config) -> dict:
     }
     result["cloud_ocr_enabled"] = cfg.cloud_ocr.enabled
     result["cloud_ocr_provider"] = cfg.cloud_ocr.provider
+    result["cloud_ocr_fallback_providers"] = list(
+        cfg.cloud_ocr.fallback_providers or []
+    )
     result["interpreters"] = []
     for py in _candidate_interpreters():
         if Path(py) == Path(sys.executable):
@@ -212,14 +216,26 @@ def print_report(info: dict, log: logging.Logger):
     elif not info["milvus_reachable"]:
         log.info("  1. 启动 Milvus（如 Docker Desktop 中的 milvus 容器）")
     if info.get("cloud_ocr_enabled"):
-        needed = {
+        provider_keys = {
             "paddle": ["PADDLE_OCR_API_KEY"],
+            "mineru": ["MINERU_API_KEY"],
             "baidu": ["BAIDU_OCR_API_KEY", "BAIDU_OCR_SECRET_KEY"],
             "openai": ["DASHSCOPE_API_KEY"],
-        }.get(info.get("cloud_ocr_provider", ""), [])
+        }
+        chain = [info.get("cloud_ocr_provider", "")] + list(
+            info.get("cloud_ocr_fallback_providers") or []
+        )
+        needed: list[str] = []
+        for p in chain:
+            for k in provider_keys.get(p, []):
+                if k not in needed:
+                    needed.append(k)
         missing = [k for k in needed if not info["env_keys"].get(k)]
         if missing:
-            log.info(f"  2. 设置 {', '.join(missing)}（云端 OCR provider={info.get('cloud_ocr_provider')} 需要）")
+            log.info(
+                f"  2. 设置 {', '.join(missing)}（云端 OCR provider 链: "
+                f"{' -> '.join(chain)} 需要）"
+            )
     else:
         log.info("  2. 云端 OCR 未启用，无需 API Key（向量化由 Milvus 服务端完成）")
     log.info("  3. 运行 `kb status` 查看知识库，`kb import --dry-run` 预演导入")
