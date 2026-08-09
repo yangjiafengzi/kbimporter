@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from kbimporter.progress import ProgressTracker, build_panel, format_duration
+from kbimporter.progress import (
+    ProgressTracker,
+    _display_width,
+    _pad_display,
+    _truncate_middle,
+    build_panel,
+    format_duration,
+)
 
 
 def test_tracker_file_lifecycle():
@@ -53,3 +60,25 @@ def test_build_panel_contains_progress_and_final():
 def test_format_duration():
     assert format_duration(65) == "01:05"
     assert format_duration(3661) == "01:01:01"
+
+
+def test_long_filename_truncated_with_ellipsis():
+    name = "中央编译局-2019-马克思恩格斯全集第38卷2版.pdf"
+    short = _truncate_middle(name, 38)
+    assert "…" in short
+    assert _display_width(short) <= 38
+    assert short.startswith("中央编译局")
+    assert short.endswith(".pdf")
+
+
+def test_panel_rows_align_by_display_width():
+    t = ProgressTracker()
+    t.set_current("x.pdf")
+    t.file_started("x.pdf")
+    t.start_subtask("1/2", "mineru", "b1")
+    panel = build_panel(t.snapshot())
+    row = panel.splitlines()[3]
+    # 每列都按显示宽度补齐：文件40 + 状态10 + 子任务8 + 页12 + 通道10
+    assert _display_width(row) == 80
+    assert _pad_display("中央", 4) == "中央"
+    assert _pad_display("ab", 4) == "ab  "

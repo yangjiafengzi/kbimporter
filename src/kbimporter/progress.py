@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import time
+import unicodedata
 from collections import deque
 from dataclasses import dataclass
 
@@ -187,6 +188,42 @@ def format_duration(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+def _char_width(ch: str) -> int:
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def _display_width(text: str) -> int:
+    return sum(_char_width(ch) for ch in text)
+
+
+def _truncate_middle(text: str, max_width: int, ellipsis: str = "…") -> str:
+    """按显示宽度截断长文本，保留开头和结尾，中间用省略号连接。"""
+    if _display_width(text) <= max_width:
+        return text
+    budget = max_width - _display_width(ellipsis)
+    head_budget = budget * 3 // 5
+    tail_budget = budget - head_budget
+    head = ""
+    for ch in text:
+        w = _char_width(ch)
+        if head_budget - w < 0:
+            break
+        head += ch
+        head_budget -= w
+    tail = ""
+    for ch in reversed(text):
+        w = _char_width(ch)
+        if tail_budget - w < 0:
+            break
+        tail = ch + tail
+        tail_budget -= w
+    return head + ellipsis + tail
+
+
+def _pad_display(text: str, width: int) -> str:
+    return text + " " * max(0, width - _display_width(text))
+
+
 def build_panel(snapshot: dict, final: bool = False, width: int = 96) -> str:
     """把进度快照渲染成终端面板文本（纯函数，便于测试）。"""
     lines = [
@@ -195,12 +232,16 @@ def build_panel(snapshot: dict, final: bool = False, width: int = 96) -> str:
         f"子任务 {snapshot['subtask_done']}/{snapshot['subtask_total']}  "
         f"耗时 {format_duration(snapshot['elapsed'])}",
         "-" * width,
-        f"{'文件':<40}{'状态':<10}{'子任务':<8}{'页':<12}{'通道':<10}",
+        _pad_display("文件", 40)
+        + _pad_display("状态", 10)
+        + _pad_display("子任务", 8)
+        + _pad_display("页", 12)
+        + _pad_display("通道", 10),
     ]
     files = snapshot["files"]
     shown = files[:10]
     for fp in shown:
-        name = fp["name"][:38]
+        name = _truncate_middle(fp["name"], 38)
         subtask = (
             f"{fp['subtask_current']}/{fp['subtask_total']}"
             if fp["subtask_total"] else "-"
@@ -210,8 +251,11 @@ def build_panel(snapshot: dict, final: bool = False, width: int = 96) -> str:
             if fp["pages_total"] else "-"
         )
         lines.append(
-            f"{name:<40}{fp['status']:<10}{subtask:<8}{pages:<12}"
-            f"{fp['provider']:<10}"
+            _pad_display(name, 40)
+            + _pad_display(fp["status"], 10)
+            + _pad_display(subtask, 8)
+            + _pad_display(pages, 12)
+            + _pad_display(fp["provider"], 10)
         )
     if len(files) > len(shown):
         lines.append(f"... 还有 {len(files) - len(shown)} 个文件")
