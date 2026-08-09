@@ -129,6 +129,10 @@ max_pages_per_task = 100
 流程：超过 `max_pages_per_task` 页时先按页拆分子 PDF -> 各子任务 multipart 提交 ->
 轮询 jobId -> 下载 JSONL -> 解析 `layoutParsingResults[].markdown.text` ->
 按页缓存并按页序合并。断点续传：已完成子任务不重复提交。
+额度规则：每模型每日 3000 页，超限返回 429——识别到 429 立即抛 `CloudQuotaError`，
+跳过重试并切换到下一个 provider；503/504 仍退避重试。
+子任务按 `max_workers`（默认 2）并发，任一失败/额度耗尽即取消剩余波次；
+`stall_timeout`（默认 900s）内进度不增长判定卡死并重新提交。
 
 #### `[cloud_ocr.mineru]`
 
@@ -151,6 +155,8 @@ max_pages_per_task = 200
 流程：申请上传链接 -> PUT 上传整份 PDF -> 轮询 `extract-results/batch/{batch_id}`
 -> 下载结果 zip 并解出 `full.md`。超过 `max_pages_per_task` 页时自动拆分多个
 子任务，识别完成后按页序合并；断点续传，已完成子任务不重复提交。
+日额度错误（`-60018`/429）同样映射为 `CloudQuotaError` 并立即切换通道；
+子任务并发与 `stall_timeout` 卡死检测行为同 PaddleOCR。
 
 #### `[cloud_ocr.baidu]`
 

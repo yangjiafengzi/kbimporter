@@ -78,6 +78,8 @@ class PaddleCloudOCR:
     poll_interval: int = 5
     max_poll_seconds: int = 7200
     max_pages_per_task: int = 100
+    max_workers: int = 2
+    stall_timeout: int = 900
     use_doc_orientation_classify: bool = False
     use_doc_unwarping: bool = False
     use_chart_recognition: bool = False
@@ -102,6 +104,8 @@ class MineruCloudOCR:
     poll_interval: int = 5
     max_poll_seconds: int = 7200
     max_pages_per_task: int = 200
+    max_workers: int = 2
+    stall_timeout: int = 900
 
 
 @dataclass
@@ -374,7 +378,8 @@ class Config:
                 setattr(cfg.cloud_ocr.paddle, key, str(pdl[key]))
         for key, cast in (("timeout", int), ("max_retries", int),
                           ("poll_interval", int), ("max_poll_seconds", int),
-                          ("max_pages_per_task", int)):
+                          ("max_pages_per_task", int), ("max_workers", int),
+                          ("stall_timeout", int)):
             if pdl.get(key) is not None:
                 setattr(cfg.cloud_ocr.paddle, key, cast(pdl[key]))
         for key in ("use_doc_orientation_classify", "use_doc_unwarping",
@@ -389,7 +394,8 @@ class Config:
                 setattr(cfg.cloud_ocr.mineru, key, str(mnr[key]))
         for key, cast in (("timeout", int), ("max_retries", int),
                           ("poll_interval", int), ("max_poll_seconds", int),
-                          ("max_pages_per_task", int)):
+                          ("max_pages_per_task", int), ("max_workers", int),
+                          ("stall_timeout", int)):
             if mnr.get(key) is not None:
                 setattr(cfg.cloud_ocr.mineru, key, cast(mnr[key]))
         for key in ("is_ocr", "enable_formula", "enable_table"):

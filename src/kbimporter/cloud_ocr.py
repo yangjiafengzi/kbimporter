@@ -8,15 +8,38 @@ import logging
 import math
 import os
 import shutil
+import threading
 import time
 import urllib.parse
 import urllib.request
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
 
 from kbimporter.config import Config
 from kbimporter.util import ensure_dir
+
+
+class CloudQuotaError(RuntimeError):
+    """云端 OCR 当日额度耗尽（如 PaddleOCR 429 / MinerU -60018）。
+
+    重试无意义，应跳过当前 provider 的内部重试，立即切换到下一个通道。
+    """
+
+
+class JobCancelledError(RuntimeError):
+    """并发子任务因其他子任务失败或额度耗尽而被取消。"""
+
+
+_QUOTA_HINTS = ("429", "quota", "limit", "60018", "额度", "上限")
+
+
+def _looks_like_quota_error(status_code: int | None = None, text: str = "") -> bool:
+    """判断是否为“当日额度耗尽”类错误（PaddleOCR 429 / MinerU -60018）。"""
+    if status_code == 429:
+        return True
+    lower = (text or "").lower()
+    return any(h in lower for h in _QUOTA_HINTS)
 
 
 def _fitz():
@@ -211,6 +234,11 @@ def _paddle_submit(cfg: Config, pdf_path: str | Path,
                     pdl.job_url, headers=headers, data=data, files=files,
                     timeout=pdl.timeout,
                 )
+            if _looks_like_quota_error(resp.status_code, resp.text):
+                raise CloudQuotaError(
+                    f"PaddleOCR 当日解析额度已用完（HTTP {resp.status_code}）: "
+                    f"{resp.text[:300]}"
+                )
             if resp.status_code == 200:
                 job_id = resp.json()["data"]["jobId"]
                 log.info(f"PaddleOCR 云任务已提交: jobId={job_id}")
@@ -219,6 +247,8 @@ def _paddle_submit(cfg: Config, pdf_path: str | Path,
                 f"PaddleOCR 提交失败: {resp.status_code} {resp.text[:300]}"
             )
             log.warning(f"  PaddleOCR 提交第 {attempt} 次失败: {resp.status_code}")
+        except CloudQuotaError:
+            raise
         except Exception as e:
             last_err = e
             log.warning(f"  PaddleOCR 提交第 {attempt} 次异常: {e}")
@@ -229,25 +259,48 @@ def _paddle_submit(cfg: Config, pdf_path: str | Path,
     )
 
 
-def _paddle_poll(cfg: Config, job_id: str, log: logging.Logger) -> dict:
+def _paddle_poll(cfg: Config, job_id: str, log: logging.Logger,
+                 cancel_event: threading.Event | None = None) -> dict:
     requests = _requests()
     pdl = cfg.cloud_ocr.paddle
     headers = _paddle_headers(cfg)
     deadline = time.time() + pdl.max_poll_seconds
+    last_progress = -1
+    last_progress_time = time.time()
     while time.time() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            raise JobCancelledError("PaddleOCR 轮询已取消（并发子任务中止）")
         resp = requests.get(
             f"{pdl.job_url}/{job_id}", headers=headers, timeout=pdl.timeout
         )
+        if _looks_like_quota_error(resp.status_code, resp.text):
+            raise CloudQuotaError(
+                f"PaddleOCR 当日解析额度已用完（HTTP {resp.status_code}）: "
+                f"{resp.text[:300]}"
+            )
         resp.raise_for_status()
         data = resp.json().get("data", {})
         state = data.get("state")
         if state == "done":
             return data
         if state == "failed":
+            err_msg = data.get("errorMsg") or ""
+            if _looks_like_quota_error(None, err_msg):
+                raise CloudQuotaError(f"PaddleOCR 云任务失败（额度/上限）: {err_msg}")
             raise RuntimeError(f"PaddleOCR 云任务失败: {data.get('errorMsg')}")
         prog = data.get("extractProgress", {})
+        extracted = prog.get("extractedPages") or 0
+        now = time.time()
+        if extracted != last_progress:
+            last_progress = extracted
+            last_progress_time = now
+        elif now - last_progress_time >= pdl.stall_timeout:
+            raise RuntimeError(
+                f"PaddleOCR 任务进度停滞超过 {pdl.stall_timeout}s"
+                f"（extractedPages={extracted}），重新提交"
+            )
         log.info(
-            f"  PaddleOCR 任务运行中: {prog.get('extractedPages')}/"
+            f"  PaddleOCR 任务运行中: {extracted}/"
             f"{prog.get('totalPages')} 页"
         )
         time.sleep(pdl.poll_interval)
@@ -276,7 +329,8 @@ def _paddle_download_pages(cfg: Config, data: dict,
 
 
 def _paddle_ocr_job(cfg: Config, pdf_path: str | Path,
-                    log: logging.Logger) -> str:
+                    log: logging.Logger,
+                    cancel_event: threading.Event | None = None) -> str:
     """PaddleOCR 云端异步任务：提交整份 PDF -> 轮询 -> 下载 JSONL -> 合并。"""
     state_dir = _state_dir(cfg, pdf_path)
     _prepare_provider_state(state_dir, "paddle")
@@ -299,8 +353,12 @@ def _paddle_ocr_job(cfg: Config, pdf_path: str | Path,
             job_id = _paddle_submit(cfg, pdf_path, log)
             _save_checkpoint_paddle(state_dir, {"job_id": job_id, "done_pages": []})
         try:
-            data = _paddle_poll(cfg, job_id, log)
+            data = _paddle_poll(cfg, job_id, log, cancel_event)
             break
+        except JobCancelledError:
+            raise
+        except CloudQuotaError:
+            raise
         except RuntimeError as e:
             last_err = e
             log.warning(f"  PaddleOCR 任务第 {attempt} 次失败: {e}")
@@ -386,6 +444,59 @@ def _split_pdf(pdf_path: str | Path, out_dir: Path, max_pages: int) -> list[Path
         src.close()
 
 
+def _run_split_sub_jobs(cfg: Config, parts: list[Path], job_func, log: logging.Logger,
+                        max_workers: int, label: str) -> list[str]:
+    """按波次并发运行子任务，保持输入顺序；任一失败即取消剩余波次。
+
+    job_func(cfg, sub, log, cancel_event) -> str
+    额度耗尽（CloudQuotaError）优先级最高：立即停止后续波次并原样上抛。
+    """
+    texts: list[str | None] = [None] * len(parts)
+    wave_size = max(1, max_workers)
+    first_error: BaseException | None = None
+    for start in range(0, len(parts), wave_size):
+        wave = list(enumerate(parts[start:start + wave_size], start))
+        for idx, sub in wave:
+            sub_total = pdf_page_count(sub)
+            log.info(
+                f"  {label} 子任务 [{idx + 1}/{len(parts)}]: "
+                f"{sub.name}（{sub_total} 页）"
+            )
+        cancel_event = threading.Event()
+        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+            futures = {
+                pool.submit(job_func, cfg, sub, log, cancel_event): idx
+                for idx, sub in wave
+            }
+            pending = set(futures)
+            while pending and not cancel_event.is_set():
+                done, pending = wait(
+                    pending, timeout=5, return_when=FIRST_COMPLETED
+                )
+                for fut in done:
+                    idx = futures[fut]
+                    try:
+                        texts[idx] = fut.result()
+                    except CloudQuotaError as e:
+                        first_error = e
+                        cancel_event.set()
+                        for f in pending:
+                            f.cancel()
+                        break
+                    except Exception as e:
+                        if not isinstance(first_error, CloudQuotaError):
+                            first_error = e
+                        cancel_event.set()
+                        for f in pending:
+                            f.cancel()
+                        break
+                if first_error is not None:
+                    break
+        if first_error is not None:
+            raise first_error
+    return [t for t in texts if t is not None]
+
+
 def _paddle_ocr_split_job(cfg: Config, pdf_path: str | Path,
                           log: logging.Logger) -> str:
     """PaddleOCR 云端任务：超过单任务页数上限时自动拆分，识别后按页序合并。"""
@@ -407,11 +518,10 @@ def _paddle_ocr_split_job(cfg: Config, pdf_path: str | Path,
     split_dir = main_state / "split"
     ensure_dir(split_dir)
     parts = _split_pdf(pdf_path, split_dir, pdl.max_pages_per_task)
-    texts: list[str] = []
-    for i, sub in enumerate(parts, 1):
-        sub_total = pdf_page_count(sub)
-        log.info(f"  PaddleOCR 子任务 [{i}/{len(parts)}]: {sub.name}（{sub_total} 页）")
-        texts.append(_paddle_ocr_job(cfg, sub, log))
+    log.info(f"PaddleOCR 子任务并发数: {pdl.max_workers}")
+    texts = _run_split_sub_jobs(
+        cfg, parts, _paddle_ocr_job, log, pdl.max_workers, "PaddleOCR"
+    )
     return "\n\n".join(t for t in texts if t and t.strip())
 
 
@@ -458,6 +568,11 @@ def _mineru_apply_upload(cfg: Config, pdf_path: str | Path,
             resp = requests.post(
                 mnr.upload_url, headers=headers, json=payload, timeout=mnr.timeout
             )
+            if _looks_like_quota_error(resp.status_code, resp.text):
+                raise CloudQuotaError(
+                    f"MinerU 当日解析额度已用完（HTTP {resp.status_code}）: "
+                    f"{resp.text[:300]}"
+                )
             data = resp.json() if resp.status_code == 200 else {}
             if resp.status_code == 200 and data.get("code") == 0:
                 batch_id = data["data"]["batch_id"]
@@ -470,6 +585,8 @@ def _mineru_apply_upload(cfg: Config, pdf_path: str | Path,
                 f"MinerU 申请上传链接失败: {resp.status_code} {resp.text[:300]}"
             )
             log.warning(f"  MinerU 申请上传链接第 {attempt} 次失败: {resp.status_code}")
+        except CloudQuotaError:
+            raise
         except Exception as e:
             last_err = e
             log.warning(f"  MinerU 申请上传链接第 {attempt} 次异常: {e}")
@@ -507,21 +624,35 @@ def _mineru_upload(cfg: Config, pdf_path: str | Path, upload_url: str,
     )
 
 
-def _mineru_poll(cfg: Config, batch_id: str, log: logging.Logger) -> str:
+def _mineru_poll(cfg: Config, batch_id: str, log: logging.Logger,
+                 cancel_event: threading.Event | None = None) -> str:
     """轮询 MinerU 批量解析结果，返回 full_zip_url。"""
     requests = _requests()
     mnr = cfg.cloud_ocr.mineru
     headers = _mineru_headers(cfg)
     headers["Content-Type"] = "application/json"
     deadline = time.time() + mnr.max_poll_seconds
+    last_progress = -1
+    last_progress_time = time.time()
     while time.time() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            raise JobCancelledError("MinerU 轮询已取消（并发子任务中止）")
         resp = requests.get(
             f"{mnr.result_url}/{batch_id}", headers=headers, timeout=mnr.timeout
         )
+        if _looks_like_quota_error(resp.status_code, resp.text):
+            raise CloudQuotaError(
+                f"MinerU 当日解析额度已用完（HTTP {resp.status_code}）: "
+                f"{resp.text[:300]}"
+            )
         resp.raise_for_status()
         data = resp.json().get("data", {})
         results = data.get("extract_result") or []
         if not results:
+            if time.time() - last_progress_time >= mnr.stall_timeout:
+                raise RuntimeError(
+                    f"MinerU 任务进度停滞超过 {mnr.stall_timeout}s（无任务结果）"
+                )
             time.sleep(mnr.poll_interval)
             continue
         item = results[0]
@@ -533,12 +664,25 @@ def _mineru_poll(cfg: Config, batch_id: str, log: logging.Logger) -> str:
             log.info(f"MinerU 任务完成: {item.get('file_name', '')}")
             return zip_url
         if state == "failed":
+            err_msg = item.get("err_msg") or item.get("errMsg") or ""
+            if _looks_like_quota_error(None, err_msg):
+                raise CloudQuotaError(f"MinerU 云任务失败（额度/上限）: {err_msg}")
             raise RuntimeError(
-                f"MinerU 云任务失败: {item.get('err_msg') or item.get('errMsg') or '未知原因'}"
+                f"MinerU 云任务失败: {err_msg or '未知原因'}"
             )
         prog = item.get("extract_progress") or {}
+        extracted = prog.get("extracted_pages") or 0
+        now = time.time()
+        if extracted != last_progress:
+            last_progress = extracted
+            last_progress_time = now
+        elif now - last_progress_time >= mnr.stall_timeout:
+            raise RuntimeError(
+                f"MinerU 任务进度停滞超过 {mnr.stall_timeout}s"
+                f"（extracted_pages={extracted}），重新提交"
+            )
         log.info(
-            f"  MinerU 任务运行中: {prog.get('extracted_pages')}/"
+            f"  MinerU 任务运行中: {extracted}/"
             f"{prog.get('total_pages')} 页"
         )
         time.sleep(mnr.poll_interval)
@@ -584,7 +728,8 @@ def _save_checkpoint_mineru(state_dir: Path, payload: dict):
 
 
 def _mineru_ocr_job(cfg: Config, pdf_path: str | Path,
-                    log: logging.Logger) -> str:
+                    log: logging.Logger,
+                    cancel_event: threading.Event | None = None) -> str:
     """MinerU 云端任务：申请上传链接 -> 上传 -> 轮询 -> 下载 full.md -> 缓存。"""
     state_dir = _state_dir(cfg, pdf_path)
     _prepare_provider_state(state_dir, "mineru")
@@ -607,9 +752,13 @@ def _mineru_ocr_job(cfg: Config, pdf_path: str | Path,
                 "total_units": 1, "done_units": [],
             })
         try:
-            zip_url = _mineru_poll(cfg, batch_id, log)
+            zip_url = _mineru_poll(cfg, batch_id, log, cancel_event)
             text = _mineru_download_md(cfg, zip_url, log)
             break
+        except JobCancelledError:
+            raise
+        except CloudQuotaError:
+            raise
         except RuntimeError as e:
             last_err = e
             log.warning(f"  MinerU 任务第 {attempt} 次失败: {e}")
@@ -649,11 +798,10 @@ def _mineru_ocr_split_job(cfg: Config, pdf_path: str | Path,
     split_dir = main_state / "split"
     ensure_dir(split_dir)
     parts = _split_pdf(pdf_path, split_dir, mnr.max_pages_per_task)
-    texts: list[str] = []
-    for i, sub in enumerate(parts, 1):
-        sub_total = pdf_page_count(sub)
-        log.info(f"  MinerU 子任务 [{i}/{len(parts)}]: {sub.name}（{sub_total} 页）")
-        texts.append(_mineru_ocr_job(cfg, sub, log))
+    log.info(f"MinerU 子任务并发数: {mnr.max_workers}")
+    texts = _run_split_sub_jobs(
+        cfg, parts, _mineru_ocr_job, log, mnr.max_workers, "MinerU"
+    )
     return "\n\n".join(t for t in texts if t and t.strip())
 
 
@@ -884,6 +1032,11 @@ def ocr_pdf_cloud(cfg: Config, pdf_path: str | Path, dry_run: bool = False,
     for provider in providers:
         try:
             return _run_cloud_provider(cfg, provider, pdf_path, log)
+        except CloudQuotaError as e:
+            errors.append(f"{provider}: {e}")
+            log.warning(
+                f"云端 OCR provider {provider} 当日额度已用完，立即切换到下一通道: {e}"
+            )
         except Exception as e:
             errors.append(f"{provider}: {e}")
             log.warning(f"云端 OCR provider {provider} 失败，尝试下一个: {e}")

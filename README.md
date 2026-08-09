@@ -203,10 +203,10 @@ docker run -d --name milvus --security-opt seccomp:unconfined `
 
 ```bash
 # 核心：向量化导入 + Zotero 同步 + 去重（体积小，任何用法都需要）
-pip install "kbimporter-0.4.0-py3-none-any.whl[import,sync,dedupe]"
+pip install "kbimporter-0.5.0-py3-none-any.whl[import,sync,dedupe]"
 # 之后按 OCR 方案补装：
-pip install "kbimporter-0.4.0-py3-none-any.whl[ocr]"       # 本地引擎（Marker/MarkItDown，较重）
-pip install "kbimporter-0.4.0-py3-none-any.whl[cloud]"     # 云端 OCR（PaddleOCR/MinerU/百度/OpenAI）
+pip install "kbimporter-0.5.0-py3-none-any.whl[ocr]"       # 本地引擎（Marker/MarkItDown，较重）
+pip install "kbimporter-0.5.0-py3-none-any.whl[cloud]"     # 云端 OCR（PaddleOCR/MinerU/百度/OpenAI）
 ```
 
 发行包本身不捆绑第三方依赖，extras 按需安装：`[import]`（向量化）、`[sync]`（Zotero
@@ -518,6 +518,17 @@ kb ocr keys                                    # 查看各 provider 密钥是否
 下一个，云端识别更稳。`baidu` 与 `openai` 是按页/按批请求，同样带断点续传，适合大文件
 分批 OCR。
 
+**429 熔断（当日额度用完自动切换通道）**：PaddleOCR 每个模型每日解析上限为 3000 页，
+用完后 API 会返回 `429`。程序识别到 429 后**不再重试当前 provider**，立即切换到
+`fallback_providers` 里的下一个通道（如 MinerU），避免在无效重试上浪费时间；MinerU 的
+日额度错误（`-60018`）同样处理。503/504 等瞬时错误仍按退避重试。
+
+**并发与超时**：超过单任务页数上限（PaddleOCR 100 页 / MinerU 200 页）的 PDF 会拆成
+多个子任务，按 `[cloud_ocr.paddle].max_workers` / `[cloud_ocr.mineru].max_workers`
+（默认 2）并发解析，结果仍按页序合并；任一子任务失败（尤其额度耗尽）会取消剩余波次。
+轮询进度超过 `stall_timeout`（默认 900 秒）不增长时判定任务卡死，自动重新提交，
+重试耗尽后再切换通道。
+
 ### 开启 MinerU 云端次选（推荐）
 
 MinerU 精准解析云 API 作为云端 OCR 的次选：主 provider（默认 PaddleOCR）整体失败时，
@@ -599,7 +610,8 @@ kb convert --engine cloud --dry-run
 - `[paths].state_db`：增量状态库；老版本用户可直接指向旧 `import_state.db` 继续增量
 - `[converter].engines`：OCR 引擎回退链
 - `[cloud_ocr]`：云端 OCR 开关、provider 与 `fallback_providers` 回退链
-- `[cloud_ocr.mineru]`：MinerU 云端 API 参数（模型版本、OCR 开关、页数上限等）
+- `[cloud_ocr.paddle]` / `[cloud_ocr.mineru]`：云端 API 参数（模型版本、OCR 开关、
+  页数上限、子任务并发数 `max_workers`、卡死判定 `stall_timeout` 等）
 - `[milvus]`：Milvus 地址与 embedding 配置
 
 完整配置参考与开发/测试说明见 [AGENTS.md](AGENTS.md)。
