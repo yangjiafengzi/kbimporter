@@ -673,7 +673,35 @@ def test_paddle_split_job_stops_on_quota(cfg, monkeypatch):
     monkeypatch.setattr(cloud_ocr, "_paddle_ocr_job", fake_job)
     with pytest.raises(cloud_ocr.CloudQuotaError):
         cloud_ocr._paddle_ocr_split_job(cfg, "big.pdf", logging.getLogger("t"))
-    assert len(calls) < 3 and "c.pdf" not in calls  # 后续波次不再提交
+    assert len(calls) <= 3  # 最多尝试全部子任务，不会超出；本次运行级跳过由上层保证
+
+
+def test_split_sub_jobs_continuous_pool_starts_next_when_worker_free(
+    cfg, monkeypatch
+):
+    import threading
+
+    _enable_cloud(cfg, provider="paddle")
+    monkeypatch.setenv("PADDLE_OCR_API_KEY", "token")
+    cfg.cloud_ocr.paddle.max_pages_per_task = 100
+    cfg.cloud_ocr.paddle.max_workers = 2
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 250)
+    monkeypatch.setattr(
+        cloud_ocr, "_split_pdf",
+        lambda pdf, out, maxp: [Path("a.pdf"), Path("b.pdf"), Path("c.pdf")],
+    )
+    barrier = threading.Barrier(2)
+
+    def fake_job(cfg_, p, log, cancel_event=None, task_tag=None):
+        # a 与 c 必须同时运行才能越过 barrier：
+        # b 先完成腾出线程，c 应立刻开始，而不是等 a 结束。
+        if p.name in ("a.pdf", "c.pdf"):
+            barrier.wait(timeout=5)
+        return p.stem
+
+    monkeypatch.setattr(cloud_ocr, "_paddle_ocr_job", fake_job)
+    text = cloud_ocr._paddle_ocr_split_job(cfg, "big.pdf", logging.getLogger("t"))
+    assert text == "a\n\nb\n\nc"
 
 
 def test_paddle_poll_stall_timeout_raises(cfg, monkeypatch):

@@ -90,7 +90,7 @@ timeout = 120
 max_retries = 3
 poll_interval = 5
 max_poll_seconds = 7200
-max_workers = 2
+max_workers = 5
 stall_timeout = 900
 use_doc_orientation_classify = false
 use_doc_unwarping = false
@@ -110,7 +110,7 @@ max_retries = 3
 poll_interval = 5
 max_poll_seconds = 7200
 max_pages_per_task = 200
-max_workers = 2
+max_workers = 5
 stall_timeout = 900
 
 [cloud_ocr.openai]

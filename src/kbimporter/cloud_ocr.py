@@ -477,57 +477,53 @@ def _split_pdf(pdf_path: str | Path, out_dir: Path, max_pages: int) -> list[Path
 
 def _run_split_sub_jobs(cfg: Config, parts: list[Path], job_func, log: logging.Logger,
                         max_workers: int, label: str) -> list[str]:
-    """按波次并发运行子任务，保持输入顺序；任一失败即取消剩余波次。
+    """用固定大小的线程池持续并发运行子任务，保持输入顺序。
 
+    任务完成一个，线程池立刻从队列补下一个，不会等整波完成；
+    任一失败（尤其额度耗尽）即取消未启动任务，并通知运行中任务尽快退出。
     job_func(cfg, sub, log, cancel_event, task_tag) -> str
-    额度耗尽（CloudQuotaError）优先级最高：立即停止后续波次并原样上抛。
     """
     texts: list[str | None] = [None] * len(parts)
-    wave_size = max(1, max_workers)
     first_error: BaseException | None = None
-    for start in range(0, len(parts), wave_size):
-        wave = list(enumerate(parts[start:start + wave_size], start))
-        for idx, sub in wave:
-            sub_total = pdf_page_count(sub)
-            log.info(
-                f"  {label} 子任务 [{idx + 1}/{len(parts)}]: "
-                f"{sub.name}（{sub_total} 页）"
-            )
-        cancel_event = threading.Event()
-        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
-            futures = {
-                pool.submit(
-                    job_func, cfg, sub, log, cancel_event,
-                    f"{idx + 1}/{len(parts)}",
-                ): idx
-                for idx, sub in wave
-            }
-            pending = set(futures)
-            while pending and not cancel_event.is_set():
-                done, pending = wait(
-                    pending, timeout=5, return_when=FIRST_COMPLETED
-                )
-                for fut in done:
-                    idx = futures[fut]
-                    try:
-                        texts[idx] = fut.result()
-                    except CloudQuotaError as e:
-                        first_error = e
-                        cancel_event.set()
-                        for f in pending:
-                            f.cancel()
-                        break
-                    except Exception as e:
-                        if not isinstance(first_error, CloudQuotaError):
-                            first_error = e
-                        cancel_event.set()
-                        for f in pending:
-                            f.cancel()
-                        break
-                if first_error is not None:
+    for idx, sub in enumerate(parts):
+        sub_total = pdf_page_count(sub)
+        log.info(
+            f"  {label} 子任务 [{idx + 1}/{len(parts)}]: "
+            f"{sub.name}（{sub_total} 页）"
+        )
+    cancel_event = threading.Event()
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
+        futures = {
+            pool.submit(
+                job_func, cfg, sub, log, cancel_event,
+                f"{idx + 1}/{len(parts)}",
+            ): idx
+            for idx, sub in enumerate(parts)
+        }
+        pending = set(futures)
+        while pending and not cancel_event.is_set():
+            done, pending = wait(pending, timeout=5, return_when=FIRST_COMPLETED)
+            for fut in done:
+                idx = futures[fut]
+                try:
+                    texts[idx] = fut.result()
+                except CloudQuotaError as e:
+                    first_error = e
+                    cancel_event.set()
+                    for f in pending:
+                        f.cancel()
                     break
-        if first_error is not None:
-            raise first_error
+                except Exception as e:
+                    if not isinstance(first_error, CloudQuotaError):
+                        first_error = e
+                    cancel_event.set()
+                    for f in pending:
+                        f.cancel()
+                    break
+            if first_error is not None:
+                break
+    if first_error is not None:
+        raise first_error
     return [t for t in texts if t is not None]
 
 

@@ -94,8 +94,8 @@ poll_interval = 5
 max_poll_seconds = 7200
 # 单任务页数上限：超过后自动拆分为多个子任务，识别完成后按页序合并
 max_pages_per_task = 100
-# 子任务并发数（保守默认 2；并发提交可能触发 503，届时会自动退避重试）
-max_workers = 2
+# 子任务并发数（默认 5；并发提交可能触发 503，届时会自动退避重试）
+max_workers = 5
 # 轮询进度停滞多久判定为卡死（秒），触发重新提交，重试耗尽后切换通道
 stall_timeout = 900
 use_doc_orientation_classify = false
@@ -117,7 +117,7 @@ max_retries = 3
 poll_interval = 5
 max_poll_seconds = 7200
 max_pages_per_task = 200   # 单任务页数上限，超过后自动拆分子任务再合并
-max_workers = 2            # 子任务并发数（与 PaddleOCR 一致，保守默认 2）
+max_workers = 5            # 子任务并发数（与 PaddleOCR 一致，默认 5）
 stall_timeout = 900        # 进度停滞判定时间（秒），超时重新提交/切换通道
 
 [cloud_ocr.openai]
