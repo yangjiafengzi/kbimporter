@@ -337,6 +337,9 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
                     log.warning(f"    云端预演失败（{e}），将按通用流程处理")
         return len(items)
 
+    for _, pdf_path in items:
+        tracker.file_queued(str(pdf_path))
+
     def process_item(idx: int, dir_rel: Path, pdf_path: Path) -> bool:
         """处理单个 PDF 的完整引擎链，返回是否成功（线程安全，不碰共享失败列表）。"""
         original_dir = scan_dir / dir_rel

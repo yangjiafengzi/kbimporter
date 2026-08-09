@@ -6,7 +6,7 @@ import threading
 import time
 import unicodedata
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -17,12 +17,16 @@ class FileProgress:
     provider: str = ""
     subtask_current: int = 0
     subtask_total: int = 0
+    subtask_completed: int = 0
+    pages_completed: int = 0
+    current_pages: int = 0
     pages_done: int = 0
     pages_total: int = 0
     job_id: str = ""
     retries: int = 0
     started_at: float = 0.0
     elapsed: float = 0.0
+    finished_tags: set[str] = field(default_factory=set)
 
 
 class ProgressTracker:
@@ -37,7 +41,6 @@ class ProgressTracker:
         self.done_files = 0
         self.failed_files = 0
         self.skipped_files = 0
-        self.subtask_done = 0
         self.started_at = time.time()
 
     def reset(self):
@@ -48,7 +51,6 @@ class ProgressTracker:
             self.done_files = 0
             self.failed_files = 0
             self.skipped_files = 0
-            self.subtask_done = 0
             self.started_at = time.time()
             self._local = threading.local()
 
@@ -80,6 +82,10 @@ class ProgressTracker:
             fp.status = "running"
             fp.started_at = time.time()
 
+    def file_queued(self, key: str):
+        with self._lock:
+            self._file(key).status = "queued"
+
     def file_finished(self, key: str, ok: bool):
         with self._lock:
             fp = self._file(key)
@@ -99,6 +105,10 @@ class ProgressTracker:
     def set_provider(self, key: str, provider: str):
         with self._lock:
             self._file(key).provider = provider
+
+    def set_file_total(self, key: str, total: int):
+        with self._lock:
+            self._file(key).pages_total = total
 
     def start_subtask(self, tag: str | None, provider: str, job_id: str):
         key = self.current()
@@ -127,20 +137,25 @@ class ProgressTracker:
             return
         with self._lock:
             fp = self._file(key)
-            fp.pages_done = pages_done
-            if pages_total is not None:
+            fp.current_pages = pages_done
+            if pages_total is not None and fp.pages_total <= 0:
                 fp.pages_total = pages_total
 
-    def finish_subtask(self, tag: str | None):
+    def finish_subtask(self, tag: str | None, pages: int = 0):
         key = self.current()
         if not key:
             return
         with self._lock:
             fp = self._file(key)
+            tag_key = tag or "1/1"
+            if tag_key in fp.finished_tags:
+                return  # 同一子任务重复完成（重试/断点）只计一次
+            fp.finished_tags.add(tag_key)
+            fp.subtask_completed += 1
             if fp.subtask_total <= 0:
                 fp.subtask_total = 1
-            fp.subtask_current = max(fp.subtask_current, 1)
-            self.subtask_done += 1
+            fp.pages_completed += max(0, pages)
+            fp.current_pages = 0
 
     def add_alert(self, message: str):
         with self._lock:
@@ -155,7 +170,9 @@ class ProgressTracker:
                     "provider": fp.provider,
                     "subtask_current": fp.subtask_current,
                     "subtask_total": fp.subtask_total,
-                    "pages_done": fp.pages_done,
+                    "subtask_completed": fp.subtask_completed,
+                    "pages_completed": fp.pages_completed,
+                    "current_pages": fp.current_pages,
                     "pages_total": fp.pages_total,
                     "job_id": fp.job_id,
                     "retries": fp.retries,
@@ -164,6 +181,7 @@ class ProgressTracker:
                 for fp in self._files.values()
             ]
             subtask_total = sum(f["subtask_total"] for f in files)
+            subtask_done = sum(f["subtask_completed"] for f in files)
             done = self.done_files + self.failed_files + self.skipped_files
             total_files = max(self.total_files, done)
             return {
@@ -171,7 +189,7 @@ class ProgressTracker:
                 "done_files": self.done_files,
                 "failed_files": self.failed_files,
                 "skipped_files": self.skipped_files,
-                "subtask_done": self.subtask_done,
+                "subtask_done": subtask_done,
                 "subtask_total": subtask_total,
                 "files": files,
                 "alerts": list(self._alerts),
@@ -242,17 +260,25 @@ def build_panel(snapshot: dict, final: bool = False, width: int = 96) -> str:
     shown = files[:10]
     for fp in shown:
         name = _truncate_middle(fp["name"], 38)
+        status = {
+            "queued": "准备",
+            "running": "识别中",
+            "done": "识别完成",
+            "failed": "失败",
+            "skipped": "跳过",
+        }.get(fp["status"], fp["status"])
         subtask = (
-            f"{fp['subtask_current']}/{fp['subtask_total']}"
+            f"{fp['subtask_completed']}/{fp['subtask_total']}"
             if fp["subtask_total"] else "-"
         )
+        pages_done = fp["pages_completed"] + fp["current_pages"]
         pages = (
-            f"{fp['pages_done']}/{fp['pages_total']}"
+            f"{pages_done}/{fp['pages_total']}"
             if fp["pages_total"] else "-"
         )
         lines.append(
             _pad_display(name, 40)
-            + _pad_display(fp["status"], 10)
+            + _pad_display(status, 10)
             + _pad_display(subtask, 8)
             + _pad_display(pages, 12)
             + _pad_display(fp["provider"], 10)

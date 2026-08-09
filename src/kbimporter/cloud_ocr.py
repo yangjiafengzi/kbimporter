@@ -416,7 +416,7 @@ def _paddle_ocr_job(cfg: Config, pdf_path: str | Path,
             "done_pages": sorted(done_pages),
         })
     result = _merge_parts(state_dir, total, 1)
-    tracker.finish_subtask(task_tag or "1/1")
+    tracker.finish_subtask(task_tag or "1/1", pages=total)
     return result
 
 
@@ -544,6 +544,7 @@ def _paddle_ocr_split_job(cfg: Config, pdf_path: str | Path,
     """PaddleOCR 云端任务：超过单任务页数上限时自动拆分，识别后按页序合并。"""
     pdl = cfg.cloud_ocr.paddle
     total = pdf_page_count(pdf_path)
+    tracker.set_file_total(str(pdf_path), total)
     main_state = _state_dir(cfg, pdf_path)
     cp = _load_checkpoint(main_state) or {}
     if cp.get("kind") == "paddle" and cp.get("total_pages") == total and \
@@ -844,7 +845,7 @@ def _mineru_ocr_job(cfg: Config, pdf_path: str | Path,
         "total_units": 1, "done_units": [0],
     })
     result = _merge_parts(state_dir, 1, 1)
-    tracker.finish_subtask(task_tag or "1/1")
+    tracker.finish_subtask(task_tag or "1/1", pages=current_total)
     return result
 
 
@@ -853,6 +854,7 @@ def _mineru_ocr_split_job(cfg: Config, pdf_path: str | Path,
     """MinerU 云端任务：超过单任务页数上限时自动拆分，识别后按子任务顺序合并。"""
     mnr = cfg.cloud_ocr.mineru
     total = pdf_page_count(pdf_path)
+    tracker.set_file_total(str(pdf_path), total)
     main_state = _state_dir(cfg, pdf_path)
     cp = _load_checkpoint(main_state) or {}
     if cp.get("kind") == "mineru" and cp.get("total_pages") == total and \
