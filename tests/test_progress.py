@@ -112,7 +112,7 @@ def test_panel_rows_align_by_display_width():
     assert _pad_display("ab", 4) == "ab  "
 
 
-def _fp(name: str, status: str, updated: float) -> dict:
+def _fp(name: str, status: str, updated: float, order: int = 0) -> dict:
     return {
         "name": name,
         "status": status,
@@ -126,6 +126,7 @@ def _fp(name: str, status: str, updated: float) -> dict:
         "retries": 0,
         "elapsed": 0,
         "updated_at": updated,
+        "order": order,
     }
 
 
@@ -143,21 +144,42 @@ def _snap(files, elapsed=10.0) -> dict:
     }
 
 
-def test_panel_prioritizes_active_files():
-    files = [_fp(f"done{i}.pdf", "done", 100 + i) for i in range(8)]
-    files.append(_fp("running-a.pdf", "running", 200))
-    files.append(_fp("queued-b.pdf", "queued", 201))
+def test_panel_shows_active_in_queue_position():
+    files = [_fp(f"done{i}.pdf", "done", 100 + i, order=i) for i in range(8)]
+    files.append(_fp("running-a.pdf", "running", 200, order=8))
+    files.append(_fp("queued-b.pdf", "queued", 201, order=9))
     panel = build_panel(_snap(files))
     assert "running-a.pdf" in panel
     assert "queued-b.pdf" in panel
-    assert panel.index("running-a.pdf") < panel.index("done0.pdf")
+    # 完成的在识别中的上方（按处理顺序排列）
+    assert panel.index("done0.pdf") < panel.index("running-a.pdf")
 
 
-def test_panel_rotates_when_many_active():
-    files = [_fp(f"run{i:02d}.pdf", "running", 1000 + i) for i in range(12)]
-    panel1 = build_panel(_snap(files, elapsed=0))
-    panel2 = build_panel(_snap(files, elapsed=30))
-    assert "（识别中 12 个，每 3 秒滚动显示）" in panel1
-    assert "run10.pdf" in panel2
-    assert panel1 != panel2
+def test_panel_window_follows_running_tail():
+    files = [_fp(f"done{i}.pdf", "done", 100 + i, order=i) for i in range(8)]
+    files += [
+        _fp(f"run{8 + i}.pdf", "running", 1000 + i, order=8 + i)
+        for i in range(4)
+    ]
+    panel = build_panel(_snap(files))
+    assert "run11.pdf" in panel
+    assert "done0.pdf" not in panel  # 顶部已完成的滚出视野
+    assert "done1.pdf" not in panel
+    assert "... 上方还有 2 个文件" in panel
 
+
+def test_panel_shows_few_queued_below_running():
+    files = [_fp(f"done{i}.pdf", "done", 100 + i, order=i) for i in range(8)]
+    files += [
+        _fp(f"run{8 + i}.pdf", "running", 1000 + i, order=8 + i)
+        for i in range(4)
+    ]
+    files += [
+        _fp(f"queued{12 + i}.pdf", "queued", 2000 + i, order=12 + i)
+        for i in range(3)
+    ]
+    panel = build_panel(_snap(files))
+    assert "run11.pdf" in panel
+    assert "queued12.pdf" in panel
+    assert "queued13.pdf" in panel
+    assert "queued14.pdf" not in panel  # 等待中的最多露出 2 个

@@ -27,6 +27,7 @@ class FileProgress:
     started_at: float = 0.0
     elapsed: float = 0.0
     updated_at: float = 0.0
+    order: int = 0
     finished_tags: set[str] = field(default_factory=set)
 
 
@@ -38,6 +39,7 @@ class ProgressTracker:
         self._files: dict[str, FileProgress] = {}
         self._alerts: deque[str] = deque(maxlen=max_alerts)
         self._local = threading.local()
+        self._next_order = 0
         self.total_files = 0
         self.done_files = 0
         self.failed_files = 0
@@ -54,6 +56,7 @@ class ProgressTracker:
             self.skipped_files = 0
             self.started_at = time.time()
             self._local = threading.local()
+            self._next_order = 0
 
     def begin(self, total_files: int):
         with self._lock:
@@ -74,6 +77,8 @@ class ProgressTracker:
         fp = self._files.get(key)
         if fp is None:
             fp = FileProgress(name=os.path.basename(key) or key)
+            fp.order = self._next_order
+            self._next_order += 1
             self._files[key] = fp
         return fp
 
@@ -191,6 +196,7 @@ class ProgressTracker:
                     "retries": fp.retries,
                     "elapsed": fp.elapsed,
                     "updated_at": fp.updated_at,
+                    "order": fp.order,
                 }
                 for fp in self._files.values()
             ]
@@ -272,21 +278,28 @@ def build_panel(snapshot: dict, final: bool = False, width: int = 96) -> str:
     ]
     files = snapshot["files"]
     max_rows = 10
-    note = ""
+    hidden_above = 0
     if final:
         shown = files[:max_rows]
     else:
-        active = [f for f in files if f["status"] in ("queued", "running")]
-        finished = [f for f in files if f["status"] not in ("queued", "running")]
-        active.sort(key=lambda f: f["updated_at"], reverse=True)
-        finished.sort(key=lambda f: f["updated_at"], reverse=True)
-        if len(active) <= max_rows:
-            shown = active + finished[: max_rows - len(active)]
+        # 按处理顺序排列，窗口锚定“最后一个正在识别的文件”：
+        # 完成的文件自然往上滚出视野，正在识别的固定在下方，
+        # 等待中的最多在底部露出 2 个。
+        ordered = sorted(files, key=lambda f: f.get("order", 0))
+        running_idx = [
+            i for i, f in enumerate(ordered)
+            if f["status"] == "running"
+        ]
+        if running_idx:
+            anchor = running_idx[-1]
+            queued_after = sum(
+                1 for f in ordered[anchor + 1:] if f["status"] == "queued"
+            )
+            window_end = anchor + 1 + min(queued_after, 2)
         else:
-            # 识别中的文件超过可视行数时，每 3 秒滚动轮换窗口，保证都能被看到
-            step = int(snapshot["elapsed"] // 3) % len(active)
-            shown = [active[(step + i) % len(active)] for i in range(max_rows)]
-            note = f"（识别中 {len(active)} 个，每 3 秒滚动显示）"
+            window_end = len(ordered)
+        hidden_above = max(0, window_end - max_rows)
+        shown = ordered[hidden_above:window_end]
     for fp in shown:
         name = _truncate_middle(fp["name"], 38)
         status = {
@@ -312,10 +325,8 @@ def build_panel(snapshot: dict, final: bool = False, width: int = 96) -> str:
             + _pad_display(pages, 12)
             + _pad_display(fp["provider"], 10)
         )
-    if note:
-        lines.append(note)
-    elif len(files) > len(shown):
-        lines.append(f"... 还有 {len(files) - len(shown)} 个文件")
+    if hidden_above > 0:
+        lines.append(f"... 上方还有 {hidden_above} 个文件")
     if snapshot["alerts"]:
         lines.append("-" * width)
         for alert in snapshot["alerts"][-3:]:
