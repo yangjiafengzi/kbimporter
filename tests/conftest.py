@@ -138,3 +138,10 @@ def cfg(tmp_path: Path) -> Config:
     )
     c.derive()
     return c
+
+
+@pytest.fixture(autouse=True)
+def _clear_cloud_quota_flags():
+    from kbimporter import cloud_ocr
+    cloud_ocr._clear_quota_flags()
+    yield

@@ -31,15 +31,32 @@ class JobCancelledError(RuntimeError):
     """并发子任务因其他子任务失败或额度耗尽而被取消。"""
 
 
-_QUOTA_HINTS = ("429", "quota", "limit", "60018", "额度", "上限")
+def _looks_like_quota_error(status_code: int | None = None, text: str = "",
+                            quota_codes: tuple[str, ...] = ()) -> bool:
+    """只有 HTTP 429 或明确的额度错误码（如 MinerU -60018）才算额度耗尽。
 
-
-def _looks_like_quota_error(status_code: int | None = None, text: str = "") -> bool:
-    """判断是否为“当日额度耗尽”类错误（PaddleOCR 429 / MinerU -60018）。"""
+    普通错误（500/503/504、文件损坏、解析失败等）一律返回 False，走正常重试。
+    """
     if status_code == 429:
         return True
     lower = (text or "").lower()
-    return any(h in lower for h in _QUOTA_HINTS)
+    return any(code.lower() in lower for code in quota_codes)
+
+
+_QUOTA_EXHAUSTED: set[str] = set()
+
+
+def _mark_quota_exhausted(provider: str):
+    """记录某 provider 今日额度已用完，本次运行剩余文件直接跳过。"""
+    _QUOTA_EXHAUSTED.add(provider)
+
+
+def _quota_exhausted(provider: str) -> bool:
+    return provider in _QUOTA_EXHAUSTED
+
+
+def _clear_quota_flags():
+    _QUOTA_EXHAUSTED.clear()
 
 
 def _fitz():
@@ -282,15 +299,19 @@ def _paddle_poll(cfg: Config, job_id: str, log: logging.Logger,
                 f"PaddleOCR 当日解析额度已用完（HTTP {resp.status_code}）: "
                 f"{resp.text[:300]}"
             )
-        resp.raise_for_status()
-        data = resp.json().get("data", {})
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"PaddleOCR{tag} 轮询请求失败: HTTP {resp.status_code} "
+                f"{resp.text[:300]}"
+            )
+        try:
+            data = resp.json().get("data", {})
+        except Exception as e:
+            raise RuntimeError(f"PaddleOCR{tag} 轮询响应解析失败: {e}") from e
         state = data.get("state")
         if state == "done":
             return data
         if state == "failed":
-            err_msg = data.get("errorMsg") or ""
-            if _looks_like_quota_error(None, err_msg):
-                raise CloudQuotaError(f"PaddleOCR 云任务失败（额度/上限）: {err_msg}")
             raise RuntimeError(f"PaddleOCR 云任务失败: {data.get('errorMsg')}")
         prog = data.get("extractProgress", {})
         extracted = prog.get("extractedPages") or 0
@@ -583,7 +604,9 @@ def _mineru_apply_upload(cfg: Config, pdf_path: str | Path,
             resp = requests.post(
                 mnr.upload_url, headers=headers, json=payload, timeout=mnr.timeout
             )
-            if _looks_like_quota_error(resp.status_code, resp.text):
+            if _looks_like_quota_error(
+                resp.status_code, resp.text, quota_codes=("60018",)
+            ):
                 raise CloudQuotaError(
                     f"MinerU 当日解析额度已用完（HTTP {resp.status_code}）: "
                     f"{resp.text[:300]}"
@@ -657,13 +680,22 @@ def _mineru_poll(cfg: Config, batch_id: str, log: logging.Logger,
         resp = requests.get(
             f"{mnr.result_url}/{batch_id}", headers=headers, timeout=mnr.timeout
         )
-        if _looks_like_quota_error(resp.status_code, resp.text):
+        if _looks_like_quota_error(
+            resp.status_code, resp.text, quota_codes=("60018",)
+        ):
             raise CloudQuotaError(
                 f"MinerU 当日解析额度已用完（HTTP {resp.status_code}）: "
                 f"{resp.text[:300]}"
             )
-        resp.raise_for_status()
-        data = resp.json().get("data", {})
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"MinerU{tag} 轮询请求失败: HTTP {resp.status_code} "
+                f"{resp.text[:300]}"
+            )
+        try:
+            data = resp.json().get("data", {})
+        except Exception as e:
+            raise RuntimeError(f"MinerU{tag} 轮询响应解析失败: {e}") from e
         results = data.get("extract_result") or []
         if not results:
             if time.time() - last_progress_time >= mnr.stall_timeout:
@@ -683,7 +715,7 @@ def _mineru_poll(cfg: Config, batch_id: str, log: logging.Logger,
             return zip_url
         if state == "failed":
             err_msg = item.get("err_msg") or item.get("errMsg") or ""
-            if _looks_like_quota_error(None, err_msg):
+            if _looks_like_quota_error(None, err_msg, quota_codes=("60018",)):
                 raise CloudQuotaError(f"MinerU 云任务失败（额度/上限）: {err_msg}")
             raise RuntimeError(
                 f"MinerU 云任务失败: {err_msg or '未知原因'}"
@@ -1056,9 +1088,14 @@ def ocr_pdf_cloud(cfg: Config, pdf_path: str | Path, dry_run: bool = False,
 
     errors: list[str] = []
     for provider in providers:
+        if _quota_exhausted(provider):
+            log.info(f"云端 OCR provider {provider} 今日额度已用完，本次运行跳过")
+            errors.append(f"{provider}: 今日额度已用完（本次运行跳过）")
+            continue
         try:
             return _run_cloud_provider(cfg, provider, pdf_path, log)
         except CloudQuotaError as e:
+            _mark_quota_exhausted(provider)
             errors.append(f"{provider}: {e}")
             log.warning(
                 f"云端 OCR provider {provider} 当日额度已用完，立即切换到下一通道: {e}"

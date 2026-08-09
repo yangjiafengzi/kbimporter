@@ -447,10 +447,101 @@ def test_provider_state_isolation_clears_old_parts(cfg, monkeypatch):
 
 def test_looks_like_quota_error():
     assert cloud_ocr._looks_like_quota_error(429) is True
-    assert cloud_ocr._looks_like_quota_error(None, "daily quota reached") is True
-    assert cloud_ocr._looks_like_quota_error(None, "额度已用完") is True
-    assert cloud_ocr._looks_like_quota_error(None, "60018") is True
+    assert cloud_ocr._looks_like_quota_error(None, "daily quota reached") is False
+    assert cloud_ocr._looks_like_quota_error(None, "额度已用完") is False
+    assert cloud_ocr._looks_like_quota_error(None, "60018") is False
+    assert cloud_ocr._looks_like_quota_error(
+        None, "60018", quota_codes=("60018",)
+    ) is True
+    assert cloud_ocr._looks_like_quota_error(None, "今日解析量已达上限") is False
+    assert cloud_ocr._looks_like_quota_error(None, "file size exceeds limit") is False
+    assert cloud_ocr._looks_like_quota_error(None, "超出文件大小上限") is False
     assert cloud_ocr._looks_like_quota_error(503, "server busy") is False
+
+
+def test_quota_skip_paddle_for_rest_of_run(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="paddle")
+    cfg.cloud_ocr.fallback_providers = ["mineru"]
+    calls = {"paddle": 0, "mineru": 0}
+
+    def fake_paddle(cfg_, pdf, log):
+        calls["paddle"] += 1
+        raise cloud_ocr.CloudQuotaError("PaddleOCR 当日解析额度已用完")
+
+    def fake_mineru(cfg_, pdf, log):
+        calls["mineru"] += 1
+        return "mineru result"
+
+    monkeypatch.setattr(cloud_ocr, "_paddle_ocr_split_job", fake_paddle)
+    monkeypatch.setattr(cloud_ocr, "_mineru_ocr_split_job", fake_mineru)
+    text = cloud_ocr.ocr_pdf_cloud(cfg, "doc1.pdf")
+    assert text == "mineru result"
+    assert calls == {"paddle": 1, "mineru": 1}
+
+    text2 = cloud_ocr.ocr_pdf_cloud(cfg, "doc2.pdf")
+    assert text2 == "mineru result"
+    assert calls == {"paddle": 1, "mineru": 2}  # 本次运行剩余文件不再尝试 paddle
+
+
+def test_paddle_poll_http_500_raises_retryable_runtime_error(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="paddle")
+    monkeypatch.setenv("PADDLE_OCR_API_KEY", "token")
+    cfg.cloud_ocr.paddle.max_poll_seconds = 10
+
+    class Resp:
+        status_code = 500
+        text = "server error"
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: Resp())
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        cloud_ocr._paddle_poll(cfg, "job1", logging.getLogger("t"))
+
+
+def test_mineru_poll_http_500_raises_retryable_runtime_error(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="mineru")
+    monkeypatch.setenv("MINERU_API_KEY", "sk-test")
+    cfg.cloud_ocr.mineru.max_poll_seconds = 10
+
+    class Resp:
+        status_code = 500
+        text = "server error"
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: Resp())
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        cloud_ocr._mineru_poll(cfg, "batch1", logging.getLogger("t"))
+
+
+def test_paddle_http_error_retries_without_immediate_failover(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="paddle")
+    cfg.cloud_ocr.fallback_providers = ["mineru"]
+    monkeypatch.setenv("PADDLE_OCR_API_KEY", "token")
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 2)
+    calls = {"submit": 0, "mineru": 0}
+
+    def fake_submit(cfg_, pdf, log, task_tag=None):
+        calls["submit"] += 1
+        return "job1"
+
+    def fake_poll(cfg_, job_id, log, cancel_event=None, task_tag=None):
+        if calls["submit"] == 1:
+            raise RuntimeError("PaddleOCR 轮询请求失败: HTTP 500")
+        return {"resultUrl": {"jsonUrl": "http://example.com/result.jsonl"}}
+
+    def fake_download(cfg_, data, log, task_tag=None):
+        return ["第一页内容", "第二页内容"]
+
+    def fake_mineru(cfg_, pdf, log):
+        calls["mineru"] += 1
+        return "mineru result"
+
+    monkeypatch.setattr(cloud_ocr, "_paddle_submit", fake_submit)
+    monkeypatch.setattr(cloud_ocr, "_paddle_poll", fake_poll)
+    monkeypatch.setattr(cloud_ocr, "_paddle_download_pages", fake_download)
+    monkeypatch.setattr(cloud_ocr, "_mineru_ocr_split_job", fake_mineru)
+    text = cloud_ocr.ocr_pdf_cloud(cfg, "doc.pdf")
+    assert calls["submit"] == 2  # HTTP 500 会重新提交重试，而不是立即切换
+    assert calls["mineru"] == 0
+    assert "第一页内容" in text
 
 
 def test_paddle_submit_quota_error_fails_fast(cfg, monkeypatch, tmp_path: Path):

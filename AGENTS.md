@@ -130,7 +130,8 @@ max_pages_per_task = 100
 轮询 jobId -> 下载 JSONL -> 解析 `layoutParsingResults[].markdown.text` ->
 按页缓存并按页序合并。断点续传：已完成子任务不重复提交。
 额度规则：每模型每日 3000 页，超限返回 429——识别到 429 立即抛 `CloudQuotaError`，
-跳过重试并切换到下一个 provider；503/504 仍退避重试。
+跳过重试并切换到下一个 provider，且本次运行剩余文件直接跳过该 provider；
+除 429 外所有错误（500/503/504、解析失败等）一律先按退避重试，重试耗尽后才回退。
 子任务按 `max_workers`（默认 2）并发，任一失败/额度耗尽即取消剩余波次；
 `stall_timeout`（默认 900s）内进度不增长判定卡死并重新提交。
 
