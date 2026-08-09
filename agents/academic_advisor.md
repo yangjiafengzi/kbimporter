@@ -9,9 +9,10 @@
 >   - `milvus_list_collections` — 列出所有可用 Collection
 >   - `milvus_load_collection` — 加载 Collection 到内存
 >   - `milvus_get_collection_info` — 查看 Collection 字段结构
->   - `milvus_text_search` — BM25 关键词全文搜索
->   - `milvus_text_similarity_search` — 密集向量语义搜索
+>   - `milvus_text_search` — 无过滤 BM25 关键词检索（不支持 `filter_expr`）
+>   - `milvus_text_similarity_search` — 语义检索（`anns_field="vector", metric_type="IP"`）或带过滤 BM25（`anns_field="sparse", metric_type="BM25"`）
 >   - `milvus_query` — 标量过滤查询（回取父块、回溯源文本）
+>   - ⚠️ 禁用 `milvus_vector_search` / `milvus_hybrid_search`（需要外部嵌入工具，本环境没有）
 > - **联网搜索 MCP** — 多源学术搜索（必选，不可跳过）：
 >   - `websearch` / `web_search` 等通用网页搜索工具
 >   - 建议同时配置多个搜索引擎（如通用搜索 + 学术搜索 + 新闻搜索），以便在一次检索中并行覆盖不同来源
@@ -99,6 +100,21 @@
 
 > **获取文献元数据的方法**：在所有检索中，`output_fields` 必须显式包含所需字段。对于 `academic_library`，固定包含 `["title","author","year","source_file","text","granularity","parent_id","chunk_index","language"]`。不指定则只返回 id 和 score。
 
+### Milvus MCP 工具速览（新版官方 MCP）
+
+| 工具 | 用途 | 关键参数 |
+| --- | --- | --- |
+| `milvus_load_collection` | 检索前加载 Collection 到内存 | `collection_name` |
+| `milvus_list_collections` | 列出当前可用 Collection | 无 |
+| `milvus_get_collection_info` | 查看 Collection 字段结构 | `collection_name` |
+| `milvus_text_similarity_search` | 语义检索 / 带过滤的 BM25 关键词检索 | 语义：`anns_field="vector", metric_type="IP"`；带过滤 BM25：`anns_field="sparse", metric_type="BM25"` |
+| `milvus_text_search` | 无过滤 BM25 关键词检索（不支持 `filter_expr`） | `collection_name, query_text, limit, output_fields` |
+| `milvus_query` | 精确过滤查询（回取父块、回溯源文本） | `filter_expr, output_fields, limit` |
+
+> ⚠️ **检索前**：若 Collection 未加载，先调用 `milvus_load_collection(collection_name=...)`。
+> ⚠️ **禁用**：`milvus_vector_search` 与 `milvus_hybrid_search` 需要外部嵌入工具生成查询向量，本环境没有，调用必然失败，一律不得使用。
+> ⚠️ **过滤**：`milvus_text_search` 不支持 `filter_expr`；需要过滤的 BM25 一律用 `milvus_text_similarity_search(..., anns_field="sparse", metric_type="BM25", filter_expr=...)`。
+
 ## 信息源二：自主联网搜索（不可跳过——这是你接触新研究的唯一窗口）
 
 **每次诊断必须进行联网搜索。** 你的 Milvus 知识库是用户已经检索到的文献——联网搜索的价值在于引入用户还没看到的、最新发表的、或来自不同学派视角的研究。
@@ -177,9 +193,11 @@ Step 0.4: 对每个 proj_* Collection，调用 milvus_get_collection_info
 
 ```
 // 中文关键词搜索 academic_library
-milvus_text_search(
+milvus_text_similarity_search(
     collection_name="academic_library",
     query_text="<中文精炼学术关键词>",
+    anns_field="sparse",
+    metric_type="BM25",
     limit=12,
     filter_expr="granularity == 'fine'",
     output_fields=["title","author","year","source_file","text",
@@ -187,9 +205,11 @@ milvus_text_search(
 )
 
 // 英文关键词搜索 academic_library（必须同时执行）
-milvus_text_search(
+milvus_text_similarity_search(
     collection_name="academic_library",
     query_text="<英文精炼学术关键词>",
+    anns_field="sparse",
+    metric_type="BM25",
     limit=12,
     filter_expr="granularity == 'fine'",
     output_fields=["title","author","year","source_file","text",
@@ -205,18 +225,22 @@ milvus_text_search(
 
 ```
 // 中文描述
-milvus_text_search(
+milvus_text_similarity_search(
     collection_name="academic_library",
     query_text="<中文描述性短句>",
+    anns_field="sparse",
+    metric_type="BM25",
     limit=12,
     filter_expr="granularity == 'fine'",
     output_fields=["title","author","year","source_file","text",
                    "granularity","parent_id","chunk_index","language"]
 )
 // 英文描述
-milvus_text_search(
+milvus_text_similarity_search(
     collection_name="academic_library",
     query_text="<英文描述性短句>",
+    anns_field="sparse",
+    metric_type="BM25",
     limit=12,
     filter_expr="granularity == 'fine'",
     output_fields=["title","author","year","source_file","text",
@@ -225,7 +249,9 @@ milvus_text_search(
 // 同样对每个 proj_* 执行
 ```
 
-> **路 1 与路 2 的差异**：路 1 用简练术语追求精确命中率，路 2 用自然语言追求覆盖面。两者虽走同一工具（BM25），但因查询文本粒度和角度不同，往往命中不同文献片段。
+> **路 1 与路 2 的差异**：路 1 用简练术语追求精确命中率，路 2 用自然语言追求覆盖面。两者虽走同一检索方式（`anns_field="sparse", metric_type="BM25"`），但因查询文本粒度和角度不同，往往命中不同文献片段。
+>
+> ⚠️ 新版 MCP 中 `milvus_text_search` **不支持 `filter_expr`**；需要限定 `granularity == 'fine'`（及语言/年份过滤）的 BM25 必须用上面的 `milvus_text_similarity_search(..., anns_field="sparse", metric_type="BM25", filter_expr=...)` 写法。
 
 ### 🟡 路 3：论点驱动的密集向量语义搜索（中英文双搜）
 
@@ -243,6 +269,7 @@ milvus_text_similarity_search(
     query_text="<中文提炼的论点>",
     anns_field="vector",
     metric_type="IP",           ← 必须使用 "IP"
+    filter_expr="granularity == 'fine'",
     limit=12,
     output_fields=["title","author","year","source_file","text",
                    "granularity","parent_id","chunk_index","language"]
@@ -253,6 +280,7 @@ milvus_text_similarity_search(
     query_text="<英文提炼的论点>",
     anns_field="vector",
     metric_type="IP",
+    filter_expr="granularity == 'fine'",
     limit=12,
     output_fields=["title","author","year","source_file","text",
                    "granularity","parent_id","chunk_index","language"]
