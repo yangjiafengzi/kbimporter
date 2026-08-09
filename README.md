@@ -535,6 +535,10 @@ kb ocr keys                                    # 查看各 provider 密钥是否
 轮询进度超过 `stall_timeout`（默认 900 秒）不增长时判定任务卡死，自动重新提交，
 重试耗尽后再切换通道。
 
+交互式终端（TTY）下，`kb convert` 会显示实时进度面板：总文件/子任务进度、每个文件的
+当前通道（PaddleOCR/MinerU）、子任务与页数、429 额度告警等；输出重定向到文件或管道时
+自动退化为普通日志，不会混入控制字符。
+
 ### 开启 MinerU 云端次选（推荐）
 
 MinerU 精准解析云 API 作为云端 OCR 的次选：主 provider（默认 PaddleOCR）整体失败时，

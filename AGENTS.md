@@ -51,6 +51,7 @@ src/kbimporter/
 ├── dedupe.py      # 去重/替换/清理
 ├── inspect.py     # 状态文件与 Milvus 集合扫描
 ├── doctor.py      # 环境体检（多 Python 环境探测）
+├── progress.py    # 终端进度面板（线程安全跟踪器 + 渲染器）
 └── setup.py       # 安装引导
 ```
 

@@ -144,4 +144,6 @@ def cfg(tmp_path: Path) -> Config:
 def _clear_cloud_quota_flags():
     from kbimporter import cloud_ocr
     cloud_ocr._clear_quota_flags()
+    from kbimporter.progress import tracker
+    tracker.reset()
     yield

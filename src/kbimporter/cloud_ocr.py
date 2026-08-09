@@ -17,6 +17,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from kbimporter.config import Config
+from kbimporter.progress import tracker
 from kbimporter.util import ensure_dir
 
 
@@ -315,6 +316,7 @@ def _paddle_poll(cfg: Config, job_id: str, log: logging.Logger,
             raise RuntimeError(f"PaddleOCR 云任务失败: {data.get('errorMsg')}")
         prog = data.get("extractProgress", {})
         extracted = prog.get("extractedPages") or 0
+        tracker.update_pages(extracted, prog.get("totalPages"))
         now = time.time()
         if extracted != last_progress:
             last_progress = extracted
@@ -381,6 +383,7 @@ def _paddle_ocr_job(cfg: Config, pdf_path: str | Path,
         if job_id is None or attempt > 1:
             job_id = _paddle_submit(cfg, pdf_path, log, task_tag=task_tag)
             _save_checkpoint_paddle(state_dir, {"job_id": job_id, "done_pages": []})
+            tracker.start_subtask(task_tag or "1/1", "paddle", job_id)
         try:
             data = _paddle_poll(
                 cfg, job_id, log, cancel_event, task_tag=task_tag
@@ -412,7 +415,9 @@ def _paddle_ocr_job(cfg: Config, pdf_path: str | Path,
             "job_id": job_id, "total_pages": total,
             "done_pages": sorted(done_pages),
         })
-    return _merge_parts(state_dir, total, 1)
+    result = _merge_parts(state_dir, total, 1)
+    tracker.finish_subtask(task_tag or "1/1")
+    return result
 
 
 def _clear_paddle_state(state_dir: Path):
@@ -476,7 +481,8 @@ def _split_pdf(pdf_path: str | Path, out_dir: Path, max_pages: int) -> list[Path
 
 
 def _run_split_sub_jobs(cfg: Config, parts: list[Path], job_func, log: logging.Logger,
-                        max_workers: int, label: str) -> list[str]:
+                        max_workers: int, label: str,
+                        progress_name: str | None = None) -> list[str]:
     """用固定大小的线程池持续并发运行子任务，保持输入顺序。
 
     任务完成一个，线程池立刻从队列补下一个，不会等整波完成；
@@ -493,10 +499,16 @@ def _run_split_sub_jobs(cfg: Config, parts: list[Path], job_func, log: logging.L
         )
     cancel_event = threading.Event()
     with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
+        def run_with_current(sub: Path, tag: str):
+            tracker.set_current(progress_name)
+            try:
+                return job_func(cfg, sub, log, cancel_event, tag)
+            finally:
+                tracker.clear_current()
+
         futures = {
             pool.submit(
-                job_func, cfg, sub, log, cancel_event,
-                f"{idx + 1}/{len(parts)}",
+                run_with_current, sub, f"{idx + 1}/{len(parts)}",
             ): idx
             for idx, sub in enumerate(parts)
         }
@@ -550,7 +562,8 @@ def _paddle_ocr_split_job(cfg: Config, pdf_path: str | Path,
     parts = _split_pdf(pdf_path, split_dir, pdl.max_pages_per_task)
     log.info(f"PaddleOCR 子任务并发数: {pdl.max_workers}")
     texts = _run_split_sub_jobs(
-        cfg, parts, _paddle_ocr_job, log, pdl.max_workers, "PaddleOCR"
+        cfg, parts, _paddle_ocr_job, log, pdl.max_workers, "PaddleOCR",
+        progress_name=str(pdf_path),
     )
     return "\n\n".join(t for t in texts if t and t.strip())
 
@@ -718,6 +731,7 @@ def _mineru_poll(cfg: Config, batch_id: str, log: logging.Logger,
             )
         prog = item.get("extract_progress") or {}
         extracted = prog.get("extracted_pages") or 0
+        tracker.update_pages(extracted, prog.get("total_pages"))
         now = time.time()
         if extracted != last_progress:
             last_progress = extracted
@@ -803,6 +817,7 @@ def _mineru_ocr_job(cfg: Config, pdf_path: str | Path,
                 "job_id": batch_id, "total_pages": current_total,
                 "total_units": 1, "done_units": [],
             })
+            tracker.start_subtask(task_tag or "1/1", "mineru", batch_id)
         try:
             zip_url = _mineru_poll(
                 cfg, batch_id, log, cancel_event, task_tag=task_tag
@@ -828,7 +843,9 @@ def _mineru_ocr_job(cfg: Config, pdf_path: str | Path,
         "job_id": batch_id, "total_pages": current_total,
         "total_units": 1, "done_units": [0],
     })
-    return _merge_parts(state_dir, 1, 1)
+    result = _merge_parts(state_dir, 1, 1)
+    tracker.finish_subtask(task_tag or "1/1")
+    return result
 
 
 def _mineru_ocr_split_job(cfg: Config, pdf_path: str | Path,
@@ -854,7 +871,8 @@ def _mineru_ocr_split_job(cfg: Config, pdf_path: str | Path,
     parts = _split_pdf(pdf_path, split_dir, mnr.max_pages_per_task)
     log.info(f"MinerU 子任务并发数: {mnr.max_workers}")
     texts = _run_split_sub_jobs(
-        cfg, parts, _mineru_ocr_job, log, mnr.max_workers, "MinerU"
+        cfg, parts, _mineru_ocr_job, log, mnr.max_workers, "MinerU",
+        progress_name=str(pdf_path),
     )
     return "\n\n".join(t for t in texts if t and t.strip())
 
@@ -1000,15 +1018,19 @@ def _ocr_page_based(cfg: Config, provider: str, pdf_path: str | Path,
 
 def _run_cloud_provider(cfg: Config, provider: str, pdf_path: str | Path,
                         log: logging.Logger) -> str:
-    if provider == "paddle":
-        return _paddle_ocr_split_job(cfg, pdf_path, log)
-    if provider == "mineru":
-        return _mineru_ocr_split_job(cfg, pdf_path, log)
-    if provider in ("openai", "baidu"):
-        return _ocr_page_based(cfg, provider, pdf_path, log)
-    raise RuntimeError(
-        f"未知云端 OCR provider: {provider}（可选 paddle / mineru / openai / baidu）"
-    )
+    tracker.set_current(str(pdf_path))
+    try:
+        if provider == "paddle":
+            return _paddle_ocr_split_job(cfg, pdf_path, log)
+        if provider == "mineru":
+            return _mineru_ocr_split_job(cfg, pdf_path, log)
+        if provider in ("openai", "baidu"):
+            return _ocr_page_based(cfg, provider, pdf_path, log)
+        raise RuntimeError(
+            f"未知云端 OCR provider: {provider}（可选 paddle / mineru / openai / baidu）"
+        )
+    finally:
+        tracker.clear_current()
 
 
 def ocr_pdf_cloud(cfg: Config, pdf_path: str | Path, dry_run: bool = False,
@@ -1086,12 +1108,15 @@ def ocr_pdf_cloud(cfg: Config, pdf_path: str | Path, dry_run: bool = False,
     for provider in providers:
         if _quota_exhausted(provider):
             log.info(f"云端 OCR provider {provider} 今日额度已用完，本次运行跳过")
+            tracker.add_alert(f"{provider} 今日额度已用完，本次运行剩余文件跳过")
             errors.append(f"{provider}: 今日额度已用完（本次运行跳过）")
             continue
         try:
+            tracker.set_provider(str(pdf_path), provider)
             return _run_cloud_provider(cfg, provider, pdf_path, log)
         except CloudQuotaError as e:
             _mark_quota_exhausted(provider)
+            tracker.add_alert(f"{provider} 当日额度已用完，本次运行剩余文件跳过")
             errors.append(f"{provider}: {e}")
             log.warning(
                 f"云端 OCR provider {provider} 当日额度已用完，立即切换到下一通道: {e}"

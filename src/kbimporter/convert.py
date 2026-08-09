@@ -14,6 +14,7 @@ from pathlib import Path
 
 from kbimporter.cloud_ocr import write_cloud_ocr_md
 from kbimporter.config import Config
+from kbimporter.progress import ProgressRenderer, tracker
 from kbimporter.scanner import init_db, set_origin
 from kbimporter.util import ensure_dir, move_to_trash, remove_file, sha256_file
 
@@ -344,6 +345,7 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
         produced_md: Path | None = None
         cleanup_dirs: list[Path] = []
         log.info(f"  [{idx}/{len(items)}] {pdf_path.name}")
+        tracker.file_started(str(pdf_path))
         for engine in cfg.engines:
             if engine == "marker":
                 # marker 批处理已失败；此处用 marker_single 单文件重试
@@ -395,11 +397,13 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
                 for d in cleanup_dirs:
                     if d.is_dir():
                         shutil.rmtree(str(d), ignore_errors=True)
+                tracker.file_finished(str(pdf_path), True)
                 return True
         for d in cleanup_dirs:
             if d.is_dir():
                 shutil.rmtree(str(d), ignore_errors=True)
         log.warning(f"    全部引擎失败: {pdf_path.name}")
+        tracker.file_finished(str(pdf_path), False)
         return False
 
     file_workers = (
@@ -555,6 +559,10 @@ def run_convert(cfg: Config, dry_run: bool = False,
         log.info("未找到任何可转换的文件")
         return {"total": 0, "markitdown": 0, "pdf": 0, "retry": 0, "failed": 0}
 
+    renderer = ProgressRenderer(tracker)
+    renderer.start()
+    tracker.begin(len(pdf_files))
+
     md_success = process_markitdown(markitdown_files, scan_dir, cfg, dry_run, failed_files, log)
     cloud_first = bool(
         cfg.cloud_ocr.enabled
@@ -603,6 +611,7 @@ def run_convert(cfg: Config, dry_run: bool = False,
              f"{lost_retry_success + retry_success}), 失败 {len(unique_failed)}")
     for f in unique_failed:
         log.info(f"  - {f}")
+    renderer.stop()
     return {
         "total": total_all,
         "markitdown": md_success,

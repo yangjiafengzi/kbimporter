@@ -483,6 +483,35 @@ def test_quota_skip_paddle_for_rest_of_run(cfg, monkeypatch):
     assert calls == {"paddle": 1, "mineru": 2}  # 本次运行剩余文件不再尝试 paddle
 
 
+def test_cloud_job_reports_to_progress_tracker(cfg, monkeypatch):
+    from kbimporter.progress import tracker as progress_tracker
+
+    _enable_cloud(cfg, provider="paddle")
+    monkeypatch.setenv("PADDLE_OCR_API_KEY", "token")
+    monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 2)
+    monkeypatch.setattr(
+        cloud_ocr, "_paddle_submit",
+        lambda c, p, l, task_tag=None: "job1",
+    )
+    monkeypatch.setattr(
+        cloud_ocr, "_paddle_poll",
+        lambda c, j, l, cancel_event=None, task_tag=None:
+        {"resultUrl": {"jsonUrl": "u"}},
+    )
+    monkeypatch.setattr(
+        cloud_ocr, "_paddle_download_pages",
+        lambda c, d, l, task_tag=None: ["第一页", "第二页"],
+    )
+    text = cloud_ocr.ocr_pdf_cloud(cfg, "doc.pdf")
+    assert "第一页" in text
+    snap = progress_tracker.snapshot()
+    assert snap["subtask_done"] == 1
+    assert any(
+        f["name"] == "doc.pdf" and f["provider"] == "paddle"
+        for f in snap["files"]
+    )
+
+
 def test_paddle_poll_http_500_raises_retryable_runtime_error(cfg, monkeypatch):
     _enable_cloud(cfg, provider="paddle")
     monkeypatch.setenv("PADDLE_OCR_API_KEY", "token")
