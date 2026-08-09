@@ -68,14 +68,14 @@ def test_paddle_provider_job_flow_with_resume(cfg, monkeypatch):
     monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 2)
     calls = {"submit": 0}
 
-    def fake_submit(cfg_, pdf, log):
+    def fake_submit(cfg_, pdf, log, task_tag=None):
         calls["submit"] += 1
         return "job1"
 
-    def fake_poll(cfg_, job_id, log, cancel_event=None):
+    def fake_poll(cfg_, job_id, log, cancel_event=None, task_tag=None):
         return {"resultUrl": {"jsonUrl": "http://example.com/result.jsonl"}}
 
-    def fake_download(cfg_, data, log):
+    def fake_download(cfg_, data, log, task_tag=None):
         return ["第一页内容", "第二页内容"]
 
     monkeypatch.setattr(cloud_ocr, "_paddle_submit", fake_submit)
@@ -119,17 +119,17 @@ def test_paddle_provider_retries_failed_job(cfg, monkeypatch):
     monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 2)
     calls = {"submit": 0, "poll": 0}
 
-    def fake_submit(cfg_, pdf, log):
+    def fake_submit(cfg_, pdf, log, task_tag=None):
         calls["submit"] += 1
         return f"job{calls['submit']}"
 
-    def fake_poll(cfg_, job_id, log, cancel_event=None):
+    def fake_poll(cfg_, job_id, log, cancel_event=None, task_tag=None):
         calls["poll"] += 1
         if calls["poll"] == 1:
             raise RuntimeError("PaddleOCR 云任务失败: OCR服务请求失败，状态码 500")
         return {"resultUrl": {"jsonUrl": "http://example.com/result.jsonl"}}
 
-    def fake_download(cfg_, data, log):
+    def fake_download(cfg_, data, log, task_tag=None):
         return ["第一页内容", "第二页内容"]
 
     monkeypatch.setattr(cloud_ocr, "_paddle_submit", fake_submit)
@@ -174,7 +174,7 @@ def test_paddle_split_job_merges_parts(cfg, monkeypatch):
     )
     calls: list[str] = []
 
-    def fake_job(cfg_, p, log, cancel_event=None):
+    def fake_job(cfg_, p, log, cancel_event=None, task_tag=None):
         calls.append(p.name)
         return f"part{['a.pdf', 'b.pdf', 'c.pdf'].index(p.name) + 1}"
 
@@ -212,18 +212,18 @@ def test_paddle_job_resets_checkpoint_when_pages_change(cfg, monkeypatch):
     monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 5)
     calls = {"submit": 0}
 
-    def fake_submit(cfg_, pdf, log):
+    def fake_submit(cfg_, pdf, log, task_tag=None):
         calls["submit"] += 1
         return "job1"
 
     monkeypatch.setattr(cloud_ocr, "_paddle_submit", fake_submit)
     monkeypatch.setattr(
         cloud_ocr, "_paddle_poll",
-        lambda c, j, l, cancel_event=None: {"resultUrl": {"jsonUrl": "u"}},
+        lambda c, j, l, cancel_event=None, task_tag=None: {"resultUrl": {"jsonUrl": "u"}},
     )
     monkeypatch.setattr(
         cloud_ocr, "_paddle_download_pages",
-        lambda c, d, l: [f"p{i}" for i in range(5)],
+        lambda c, d, l, task_tag=None: [f"p{i}" for i in range(5)],
     )
     text = cloud_ocr._paddle_ocr_job(cfg, "doc.pdf", logging.getLogger("t"))
     assert calls["submit"] == 1
@@ -261,7 +261,7 @@ def test_mineru_provider_job_flow_with_resume(cfg, monkeypatch):
     monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 2)
     calls = {"apply": 0, "upload": 0, "poll": 0, "download": 0}
 
-    def fake_apply(cfg_, pdf, log):
+    def fake_apply(cfg_, pdf, log, task_tag=None):
         calls["apply"] += 1
         return "batch1", "http://example.com/upload"
 
@@ -269,11 +269,11 @@ def test_mineru_provider_job_flow_with_resume(cfg, monkeypatch):
         calls["upload"] += 1
         assert url == "http://example.com/upload"
 
-    def fake_poll(cfg_, batch_id, log, cancel_event=None):
+    def fake_poll(cfg_, batch_id, log, cancel_event=None, task_tag=None):
         calls["poll"] += 1
         return "http://example.com/result.zip"
 
-    def fake_download(cfg_, zip_url, log):
+    def fake_download(cfg_, zip_url, log, task_tag=None):
         calls["download"] += 1
         return "MinerU 识别全文"
 
@@ -357,20 +357,20 @@ def test_mineru_provider_retries_failed_job(cfg, monkeypatch):
     monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 2)
     calls = {"apply": 0, "poll": 0}
 
-    def fake_apply(cfg_, pdf, log):
+    def fake_apply(cfg_, pdf, log, task_tag=None):
         calls["apply"] += 1
         return f"batch{calls['apply']}", f"http://example.com/upload{calls['apply']}"
 
     def fake_upload(cfg_, pdf, url, log):
         pass
 
-    def fake_poll(cfg_, batch_id, log, cancel_event=None):
+    def fake_poll(cfg_, batch_id, log, cancel_event=None, task_tag=None):
         calls["poll"] += 1
         if calls["poll"] == 1:
             raise RuntimeError("MinerU 云任务失败: 服务繁忙")
         return "http://example.com/result.zip"
 
-    def fake_download(cfg_, zip_url, log):
+    def fake_download(cfg_, zip_url, log, task_tag=None):
         return "mineru 全文"
 
     monkeypatch.setattr(cloud_ocr, "_mineru_apply_upload", fake_apply)
@@ -394,7 +394,7 @@ def test_mineru_split_job_merges_parts(cfg, monkeypatch):
     )
     calls: list[str] = []
 
-    def fake_job(cfg_, p, log, cancel_event=None):
+    def fake_job(cfg_, p, log, cancel_event=None, task_tag=None):
         calls.append(p.name)
         return f"part{['a.pdf', 'b.pdf', 'c.pdf'].index(p.name) + 1}"
 
@@ -503,11 +503,11 @@ def test_paddle_ocr_job_quota_no_resubmit(cfg, monkeypatch):
     monkeypatch.setattr(cloud_ocr, "pdf_page_count", lambda p: 2)
     calls = {"submit": 0}
 
-    def fake_submit(cfg_, pdf, log):
+    def fake_submit(cfg_, pdf, log, task_tag=None):
         calls["submit"] += 1
         return "job1"
 
-    def fake_poll(cfg_, job_id, log, cancel_event=None):
+    def fake_poll(cfg_, job_id, log, cancel_event=None, task_tag=None):
         raise cloud_ocr.CloudQuotaError("PaddleOCR 当日解析额度已用完")
 
     monkeypatch.setattr(cloud_ocr, "_paddle_submit", fake_submit)
@@ -552,7 +552,7 @@ def test_paddle_split_job_runs_subtasks_concurrently(cfg, monkeypatch):
     threads: list[str] = []
     barrier = threading.Barrier(2)
 
-    def fake_job(cfg_, p, log, cancel_event=None):
+    def fake_job(cfg_, p, log, cancel_event=None, task_tag=None):
         threads.append(threading.current_thread().name)
         barrier.wait(timeout=5)
         return f"part-{p.stem}"
@@ -575,7 +575,7 @@ def test_paddle_split_job_stops_on_quota(cfg, monkeypatch):
     )
     calls: list[str] = []
 
-    def fake_job(cfg_, p, log, cancel_event=None):
+    def fake_job(cfg_, p, log, cancel_event=None, task_tag=None):
         calls.append(p.name)
         raise cloud_ocr.CloudQuotaError("PaddleOCR 当日解析额度已用完")
 

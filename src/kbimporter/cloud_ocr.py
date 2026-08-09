@@ -212,10 +212,12 @@ def _paddle_headers(cfg: Config) -> dict:
 
 
 def _paddle_submit(cfg: Config, pdf_path: str | Path,
-                   log: logging.Logger) -> str:
+                   log: logging.Logger,
+                   task_tag: str | None = None) -> str:
     requests = _requests()
     pdl = cfg.cloud_ocr.paddle
     headers = _paddle_headers(cfg)
+    tag = f" [子任务{task_tag}]" if task_tag else ""
     optional_payload = {
         "useDocOrientationClassify": pdl.use_doc_orientation_classify,
         "useDocUnwarping": pdl.use_doc_unwarping,
@@ -241,17 +243,17 @@ def _paddle_submit(cfg: Config, pdf_path: str | Path,
                 )
             if resp.status_code == 200:
                 job_id = resp.json()["data"]["jobId"]
-                log.info(f"PaddleOCR 云任务已提交: jobId={job_id}")
+                log.info(f"PaddleOCR 云任务已提交{tag}: jobId={job_id}")
                 return job_id
             last_err = RuntimeError(
                 f"PaddleOCR 提交失败: {resp.status_code} {resp.text[:300]}"
             )
-            log.warning(f"  PaddleOCR 提交第 {attempt} 次失败: {resp.status_code}")
+            log.warning(f"  PaddleOCR{tag} 提交第 {attempt} 次失败: {resp.status_code}")
         except CloudQuotaError:
             raise
         except Exception as e:
             last_err = e
-            log.warning(f"  PaddleOCR 提交第 {attempt} 次异常: {e}")
+            log.warning(f"  PaddleOCR{tag} 提交第 {attempt} 次异常: {e}")
         if attempt < pdl.max_retries:
             time.sleep(min(2 ** attempt, 30))
     raise RuntimeError(
@@ -260,10 +262,12 @@ def _paddle_submit(cfg: Config, pdf_path: str | Path,
 
 
 def _paddle_poll(cfg: Config, job_id: str, log: logging.Logger,
-                 cancel_event: threading.Event | None = None) -> dict:
+                 cancel_event: threading.Event | None = None,
+                 task_tag: str | None = None) -> dict:
     requests = _requests()
     pdl = cfg.cloud_ocr.paddle
     headers = _paddle_headers(cfg)
+    tag = f" [子任务{task_tag}]" if task_tag else ""
     deadline = time.time() + pdl.max_poll_seconds
     last_progress = -1
     last_progress_time = time.time()
@@ -296,20 +300,22 @@ def _paddle_poll(cfg: Config, job_id: str, log: logging.Logger,
             last_progress_time = now
         elif now - last_progress_time >= pdl.stall_timeout:
             raise RuntimeError(
-                f"PaddleOCR 任务进度停滞超过 {pdl.stall_timeout}s"
+                f"PaddleOCR{tag} 任务进度停滞超过 {pdl.stall_timeout}s"
                 f"（extractedPages={extracted}），重新提交"
             )
         log.info(
-            f"  PaddleOCR 任务运行中: {extracted}/"
-            f"{prog.get('totalPages')} 页"
+            f"  PaddleOCR{tag} 任务运行中: {extracted}/"
+            f"{prog.get('totalPages')} 页 (jobId={job_id})"
         )
         time.sleep(pdl.poll_interval)
     raise RuntimeError("PaddleOCR 云任务超时")
 
 
 def _paddle_download_pages(cfg: Config, data: dict,
-                           log: logging.Logger) -> list[str]:
+                           log: logging.Logger,
+                           task_tag: str | None = None) -> list[str]:
     requests = _requests()
+    tag = f" [子任务{task_tag}]" if task_tag else ""
     jsonl_url = data["resultUrl"]["jsonUrl"]
     resp = requests.get(jsonl_url, timeout=cfg.cloud_ocr.paddle.timeout)
     resp.raise_for_status()
@@ -324,14 +330,16 @@ def _paddle_download_pages(cfg: Config, data: dict,
             for r in result.get("layoutParsingResults", [])
         ]
         pages.append("\n\n".join(t for t in texts if t))
-    log.info(f"PaddleOCR 结果下载完成: {len(pages)} 页")
+    log.info(f"PaddleOCR{tag} 结果下载完成: {len(pages)} 页")
     return pages
 
 
 def _paddle_ocr_job(cfg: Config, pdf_path: str | Path,
                     log: logging.Logger,
-                    cancel_event: threading.Event | None = None) -> str:
+                    cancel_event: threading.Event | None = None,
+                    task_tag: str | None = None) -> str:
     """PaddleOCR 云端异步任务：提交整份 PDF -> 轮询 -> 下载 JSONL -> 合并。"""
+    tag = f" [子任务{task_tag}]" if task_tag else ""
     state_dir = _state_dir(cfg, pdf_path)
     _prepare_provider_state(state_dir, "paddle")
     cp = _load_checkpoint(state_dir) or {}
@@ -350,10 +358,12 @@ def _paddle_ocr_job(cfg: Config, pdf_path: str | Path,
     job_id = cp.get("job_id")
     for attempt in range(1, pdl.max_retries + 1):
         if job_id is None or attempt > 1:
-            job_id = _paddle_submit(cfg, pdf_path, log)
+            job_id = _paddle_submit(cfg, pdf_path, log, task_tag=task_tag)
             _save_checkpoint_paddle(state_dir, {"job_id": job_id, "done_pages": []})
         try:
-            data = _paddle_poll(cfg, job_id, log, cancel_event)
+            data = _paddle_poll(
+                cfg, job_id, log, cancel_event, task_tag=task_tag
+            )
             break
         except JobCancelledError:
             raise
@@ -361,7 +371,7 @@ def _paddle_ocr_job(cfg: Config, pdf_path: str | Path,
             raise
         except RuntimeError as e:
             last_err = e
-            log.warning(f"  PaddleOCR 任务第 {attempt} 次失败: {e}")
+            log.warning(f"  PaddleOCR{tag} 任务第 {attempt} 次失败: {e}")
             job_id = None
     else:
         raise RuntimeError(
@@ -369,7 +379,7 @@ def _paddle_ocr_job(cfg: Config, pdf_path: str | Path,
             "可能原因：PDF 加密/损坏、PaddleOCR 服务繁忙、API Key 失效。"
             "可稍后重试，或换用其他 OCR 引擎（kb ocr mode local）"
         )
-    pages = _paddle_download_pages(cfg, data, log)
+    pages = _paddle_download_pages(cfg, data, log, task_tag=task_tag)
     total = len(pages)
     done_pages = set(cp.get("done_pages", []))
     for idx, text in enumerate(pages):
@@ -448,7 +458,7 @@ def _run_split_sub_jobs(cfg: Config, parts: list[Path], job_func, log: logging.L
                         max_workers: int, label: str) -> list[str]:
     """按波次并发运行子任务，保持输入顺序；任一失败即取消剩余波次。
 
-    job_func(cfg, sub, log, cancel_event) -> str
+    job_func(cfg, sub, log, cancel_event, task_tag) -> str
     额度耗尽（CloudQuotaError）优先级最高：立即停止后续波次并原样上抛。
     """
     texts: list[str | None] = [None] * len(parts)
@@ -465,7 +475,10 @@ def _run_split_sub_jobs(cfg: Config, parts: list[Path], job_func, log: logging.L
         cancel_event = threading.Event()
         with ThreadPoolExecutor(max_workers=len(wave)) as pool:
             futures = {
-                pool.submit(job_func, cfg, sub, log, cancel_event): idx
+                pool.submit(
+                    job_func, cfg, sub, log, cancel_event,
+                    f"{idx + 1}/{len(parts)}",
+                ): idx
                 for idx, sub in wave
             }
             pending = set(futures)
@@ -545,12 +558,14 @@ def _mineru_headers(cfg: Config) -> dict:
 
 
 def _mineru_apply_upload(cfg: Config, pdf_path: str | Path,
-                         log: logging.Logger) -> tuple[str, str]:
+                         log: logging.Logger,
+                         task_tag: str | None = None) -> tuple[str, str]:
     """申请 MinerU 文件上传链接，返回 (batch_id, upload_url)。"""
     requests = _requests()
     mnr = cfg.cloud_ocr.mineru
     headers = _mineru_headers(cfg)
     headers["Content-Type"] = "application/json"
+    tag = f" [子任务{task_tag}]" if task_tag else ""
     payload = {
         "files": [{
             "name": Path(pdf_path).name,
@@ -579,17 +594,17 @@ def _mineru_apply_upload(cfg: Config, pdf_path: str | Path,
                 urls = data["data"].get("file_urls") or []
                 if not urls:
                     raise RuntimeError("MinerU 申请上传链接未返回 file_urls")
-                log.info(f"MinerU 已申请上传链接: batch_id={batch_id}")
+                log.info(f"MinerU 已申请上传链接{tag}: batch_id={batch_id}")
                 return batch_id, urls[0]
             last_err = RuntimeError(
                 f"MinerU 申请上传链接失败: {resp.status_code} {resp.text[:300]}"
             )
-            log.warning(f"  MinerU 申请上传链接第 {attempt} 次失败: {resp.status_code}")
+            log.warning(f"  MinerU{tag} 申请上传链接第 {attempt} 次失败: {resp.status_code}")
         except CloudQuotaError:
             raise
         except Exception as e:
             last_err = e
-            log.warning(f"  MinerU 申请上传链接第 {attempt} 次异常: {e}")
+            log.warning(f"  MinerU{tag} 申请上传链接第 {attempt} 次异常: {e}")
         if attempt < mnr.max_retries:
             time.sleep(min(2 ** attempt, 30))
     raise RuntimeError(
@@ -625,12 +640,14 @@ def _mineru_upload(cfg: Config, pdf_path: str | Path, upload_url: str,
 
 
 def _mineru_poll(cfg: Config, batch_id: str, log: logging.Logger,
-                 cancel_event: threading.Event | None = None) -> str:
+                 cancel_event: threading.Event | None = None,
+                 task_tag: str | None = None) -> str:
     """轮询 MinerU 批量解析结果，返回 full_zip_url。"""
     requests = _requests()
     mnr = cfg.cloud_ocr.mineru
     headers = _mineru_headers(cfg)
     headers["Content-Type"] = "application/json"
+    tag = f" [子任务{task_tag}]" if task_tag else ""
     deadline = time.time() + mnr.max_poll_seconds
     last_progress = -1
     last_progress_time = time.time()
@@ -651,7 +668,8 @@ def _mineru_poll(cfg: Config, batch_id: str, log: logging.Logger,
         if not results:
             if time.time() - last_progress_time >= mnr.stall_timeout:
                 raise RuntimeError(
-                    f"MinerU 任务进度停滞超过 {mnr.stall_timeout}s（无任务结果）"
+                    f"MinerU{tag} 任务进度停滞超过 {mnr.stall_timeout}s"
+                    f"（无任务结果, batch_id={batch_id}）"
                 )
             time.sleep(mnr.poll_interval)
             continue
@@ -678,22 +696,24 @@ def _mineru_poll(cfg: Config, batch_id: str, log: logging.Logger,
             last_progress_time = now
         elif now - last_progress_time >= mnr.stall_timeout:
             raise RuntimeError(
-                f"MinerU 任务进度停滞超过 {mnr.stall_timeout}s"
+                f"MinerU{tag} 任务进度停滞超过 {mnr.stall_timeout}s"
                 f"（extracted_pages={extracted}），重新提交"
             )
         log.info(
-            f"  MinerU 任务运行中: {extracted}/"
-            f"{prog.get('total_pages')} 页"
+            f"  MinerU{tag} 任务运行中: {extracted}/"
+            f"{prog.get('total_pages')} 页 (batch_id={batch_id})"
         )
         time.sleep(mnr.poll_interval)
     raise RuntimeError("MinerU 云任务超时")
 
 
 def _mineru_download_md(cfg: Config, zip_url: str,
-                        log: logging.Logger) -> str:
+                        log: logging.Logger,
+                        task_tag: str | None = None) -> str:
     """下载 MinerU 结果 zip，解出 full.md 并返回 Markdown 文本。"""
     requests = _requests()
     mnr = cfg.cloud_ocr.mineru
+    tag = f" [子任务{task_tag}]" if task_tag else ""
     last_err: Exception | None = None
     for attempt in range(1, mnr.max_retries + 1):
         try:
@@ -708,11 +728,11 @@ def _mineru_download_md(cfg: Config, zip_url: str,
                         f"MinerU 结果压缩包缺少 full.md: {zf.namelist()[:5]}"
                     )
                 text = zf.read(md_name).decode("utf-8", errors="replace")
-            log.info(f"MinerU 结果下载完成: {md_name}（{len(text)} 字符）")
+            log.info(f"MinerU{tag} 结果下载完成: {md_name}（{len(text)} 字符）")
             return text
         except Exception as e:
             last_err = e
-            log.warning(f"  MinerU 结果下载第 {attempt} 次失败: {e}")
+            log.warning(f"  MinerU{tag} 结果下载第 {attempt} 次失败: {e}")
         if attempt < mnr.max_retries:
             time.sleep(min(2 ** attempt, 30))
     raise RuntimeError(
@@ -729,8 +749,10 @@ def _save_checkpoint_mineru(state_dir: Path, payload: dict):
 
 def _mineru_ocr_job(cfg: Config, pdf_path: str | Path,
                     log: logging.Logger,
-                    cancel_event: threading.Event | None = None) -> str:
+                    cancel_event: threading.Event | None = None,
+                    task_tag: str | None = None) -> str:
     """MinerU 云端任务：申请上传链接 -> 上传 -> 轮询 -> 下载 full.md -> 缓存。"""
+    tag = f" [子任务{task_tag}]" if task_tag else ""
     state_dir = _state_dir(cfg, pdf_path)
     _prepare_provider_state(state_dir, "mineru")
     current_total = pdf_page_count(pdf_path)
@@ -745,15 +767,19 @@ def _mineru_ocr_job(cfg: Config, pdf_path: str | Path,
     batch_id = cp.get("job_id") if cp.get("kind") == "mineru" else None
     for attempt in range(1, mnr.max_retries + 1):
         if batch_id is None or attempt > 1:
-            batch_id, upload_url = _mineru_apply_upload(cfg, pdf_path, log)
+            batch_id, upload_url = _mineru_apply_upload(
+                cfg, pdf_path, log, task_tag=task_tag
+            )
             _mineru_upload(cfg, pdf_path, upload_url, log)
             _save_checkpoint_mineru(state_dir, {
                 "job_id": batch_id, "total_pages": current_total,
                 "total_units": 1, "done_units": [],
             })
         try:
-            zip_url = _mineru_poll(cfg, batch_id, log, cancel_event)
-            text = _mineru_download_md(cfg, zip_url, log)
+            zip_url = _mineru_poll(
+                cfg, batch_id, log, cancel_event, task_tag=task_tag
+            )
+            text = _mineru_download_md(cfg, zip_url, log, task_tag=task_tag)
             break
         except JobCancelledError:
             raise
@@ -761,7 +787,7 @@ def _mineru_ocr_job(cfg: Config, pdf_path: str | Path,
             raise
         except RuntimeError as e:
             last_err = e
-            log.warning(f"  MinerU 任务第 {attempt} 次失败: {e}")
+            log.warning(f"  MinerU{tag} 任务第 {attempt} 次失败: {e}")
             batch_id = None
     else:
         raise RuntimeError(
