@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import logging
-import sys
-
 from kbimporter.progress import (
     ProgressTracker,
-    ProgressRenderer,
     _display_width,
     _pad_display,
     _truncate_middle,
@@ -165,27 +161,3 @@ def test_panel_rotates_when_many_active():
     assert "run10.pdf" in panel2
     assert panel1 != panel2
 
-
-def test_renderer_suppresses_console_info():
-    logger = logging.getLogger("kbimporter")
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.INFO)
-    logger.addHandler(handler)
-    try:
-        class FakeStream:
-            def isatty(self):
-                return True
-
-            def write(self, text):
-                pass
-
-            def flush(self):
-                pass
-
-        renderer = ProgressRenderer(ProgressTracker(), stream=FakeStream())
-        renderer.start()
-        assert handler.level == logging.WARNING
-        renderer.stop()
-        assert handler.level == logging.INFO
-    finally:
-        logger.removeHandler(handler)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 import sys
 import threading
@@ -359,7 +358,6 @@ class ProgressRenderer:
     def start(self):
         if not self._enabled:
             return
-        self._suppress_console_info()
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -370,10 +368,8 @@ class ProgressRenderer:
             self._thread.join(timeout=2)
             self._thread = None
             self._render(final=True)
-            self._restore_console_levels()
         elif self._enabled:
             self._render(final=True)
-            self._restore_console_levels()
 
     def _loop(self):
         while not self._stop.wait(self.interval):
@@ -383,26 +379,6 @@ class ProgressRenderer:
         text = build_panel(self.tracker.snapshot(), final=final)
         self.stream.write("\033[H\033[2J" + text + "\n")
         self.stream.flush()
-
-    def _console_handlers(self):
-        logger = logging.getLogger("kbimporter")
-        return [
-            h for h in logger.handlers
-            if isinstance(h, logging.StreamHandler)
-            and h.stream in (sys.stdout, sys.stderr)
-        ]
-
-    def _suppress_console_info(self):
-        """面板运行期间把控制台 INFO 日志压到 WARNING，避免进度行插进面板。"""
-        self._saved_handler_levels = []
-        for handler in self._console_handlers():
-            self._saved_handler_levels.append((handler, handler.level))
-            handler.setLevel(logging.WARNING)
-
-    def _restore_console_levels(self):
-        for handler, level in getattr(self, "_saved_handler_levels", []):
-            handler.setLevel(level)
-        self._saved_handler_levels = []
 
 
 tracker = ProgressTracker()
