@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
+import sys
+
 from kbimporter.progress import (
     ProgressTracker,
+    ProgressRenderer,
     _display_width,
     _pad_display,
     _truncate_middle,
@@ -110,3 +114,78 @@ def test_panel_rows_align_by_display_width():
     assert _display_width(row) == 82
     assert _pad_display("中央", 4) == "中央"
     assert _pad_display("ab", 4) == "ab  "
+
+
+def _fp(name: str, status: str, updated: float) -> dict:
+    return {
+        "name": name,
+        "status": status,
+        "provider": "mineru",
+        "subtask_completed": 0,
+        "subtask_total": 1,
+        "pages_completed": 0,
+        "current_pages": 0,
+        "pages_total": 100,
+        "job_id": "",
+        "retries": 0,
+        "elapsed": 0,
+        "updated_at": updated,
+    }
+
+
+def _snap(files, elapsed=10.0) -> dict:
+    return {
+        "total_files": len(files),
+        "done_files": sum(1 for f in files if f["status"] == "done"),
+        "failed_files": 0,
+        "skipped_files": 0,
+        "subtask_done": 0,
+        "subtask_total": 0,
+        "files": files,
+        "alerts": [],
+        "elapsed": elapsed,
+    }
+
+
+def test_panel_prioritizes_active_files():
+    files = [_fp(f"done{i}.pdf", "done", 100 + i) for i in range(8)]
+    files.append(_fp("running-a.pdf", "running", 200))
+    files.append(_fp("queued-b.pdf", "queued", 201))
+    panel = build_panel(_snap(files))
+    assert "running-a.pdf" in panel
+    assert "queued-b.pdf" in panel
+    assert panel.index("running-a.pdf") < panel.index("done0.pdf")
+
+
+def test_panel_rotates_when_many_active():
+    files = [_fp(f"run{i:02d}.pdf", "running", 1000 + i) for i in range(12)]
+    panel1 = build_panel(_snap(files, elapsed=0))
+    panel2 = build_panel(_snap(files, elapsed=30))
+    assert "（识别中 12 个，每 3 秒滚动显示）" in panel1
+    assert "run10.pdf" in panel2
+    assert panel1 != panel2
+
+
+def test_renderer_suppresses_console_info():
+    logger = logging.getLogger("kbimporter")
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    try:
+        class FakeStream:
+            def isatty(self):
+                return True
+
+            def write(self, text):
+                pass
+
+            def flush(self):
+                pass
+
+        renderer = ProgressRenderer(ProgressTracker(), stream=FakeStream())
+        renderer.start()
+        assert handler.level == logging.WARNING
+        renderer.stop()
+        assert handler.level == logging.INFO
+    finally:
+        logger.removeHandler(handler)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import threading
@@ -26,6 +27,7 @@ class FileProgress:
     retries: int = 0
     started_at: float = 0.0
     elapsed: float = 0.0
+    updated_at: float = 0.0
     finished_tags: set[str] = field(default_factory=set)
 
 
@@ -81,16 +83,20 @@ class ProgressTracker:
             fp = self._file(key)
             fp.status = "running"
             fp.started_at = time.time()
+            fp.updated_at = time.time()
 
     def file_queued(self, key: str):
         with self._lock:
-            self._file(key).status = "queued"
+            fp = self._file(key)
+            fp.status = "queued"
+            fp.updated_at = time.time()
 
     def file_finished(self, key: str, ok: bool):
         with self._lock:
             fp = self._file(key)
             fp.status = "done" if ok else "failed"
             fp.elapsed = time.time() - (fp.started_at or time.time())
+            fp.updated_at = time.time()
             if ok:
                 self.done_files += 1
             else:
@@ -100,15 +106,20 @@ class ProgressTracker:
         with self._lock:
             fp = self._file(key)
             fp.status = "skipped"
+            fp.updated_at = time.time()
             self.skipped_files += 1
 
     def set_provider(self, key: str, provider: str):
         with self._lock:
-            self._file(key).provider = provider
+            fp = self._file(key)
+            fp.provider = provider
+            fp.updated_at = time.time()
 
     def set_file_total(self, key: str, total: int):
         with self._lock:
-            self._file(key).pages_total = total
+            fp = self._file(key)
+            fp.pages_total = total
+            fp.updated_at = time.time()
 
     def start_subtask(self, tag: str | None, provider: str, job_id: str):
         key = self.current()
@@ -130,6 +141,7 @@ class ProgressTracker:
             fp.job_id = job_id
             fp.subtask_current = current
             fp.subtask_total = total
+            fp.updated_at = time.time()
 
     def update_pages(self, pages_done: int, pages_total: int | None = None):
         key = self.current()
@@ -140,6 +152,7 @@ class ProgressTracker:
             fp.current_pages = pages_done
             if pages_total is not None and fp.pages_total <= 0:
                 fp.pages_total = pages_total
+            fp.updated_at = time.time()
 
     def finish_subtask(self, tag: str | None, pages: int = 0):
         key = self.current()
@@ -156,6 +169,7 @@ class ProgressTracker:
                 fp.subtask_total = 1
             fp.pages_completed += max(0, pages)
             fp.current_pages = 0
+            fp.updated_at = time.time()
 
     def add_alert(self, message: str):
         with self._lock:
@@ -177,6 +191,7 @@ class ProgressTracker:
                     "job_id": fp.job_id,
                     "retries": fp.retries,
                     "elapsed": fp.elapsed,
+                    "updated_at": fp.updated_at,
                 }
                 for fp in self._files.values()
             ]
@@ -257,7 +272,22 @@ def build_panel(snapshot: dict, final: bool = False, width: int = 96) -> str:
         + _pad_display("通道", 10),
     ]
     files = snapshot["files"]
-    shown = files[:10]
+    max_rows = 10
+    note = ""
+    if final:
+        shown = files[:max_rows]
+    else:
+        active = [f for f in files if f["status"] in ("queued", "running")]
+        finished = [f for f in files if f["status"] not in ("queued", "running")]
+        active.sort(key=lambda f: f["updated_at"], reverse=True)
+        finished.sort(key=lambda f: f["updated_at"], reverse=True)
+        if len(active) <= max_rows:
+            shown = active + finished[: max_rows - len(active)]
+        else:
+            # 识别中的文件超过可视行数时，每 3 秒滚动轮换窗口，保证都能被看到
+            step = int(snapshot["elapsed"] // 3) % len(active)
+            shown = [active[(step + i) % len(active)] for i in range(max_rows)]
+            note = f"（识别中 {len(active)} 个，每 3 秒滚动显示）"
     for fp in shown:
         name = _truncate_middle(fp["name"], 38)
         status = {
@@ -283,7 +313,9 @@ def build_panel(snapshot: dict, final: bool = False, width: int = 96) -> str:
             + _pad_display(pages, 12)
             + _pad_display(fp["provider"], 10)
         )
-    if len(files) > len(shown):
+    if note:
+        lines.append(note)
+    elif len(files) > len(shown):
         lines.append(f"... 还有 {len(files) - len(shown)} 个文件")
     if snapshot["alerts"]:
         lines.append("-" * width)
@@ -327,6 +359,7 @@ class ProgressRenderer:
     def start(self):
         if not self._enabled:
             return
+        self._suppress_console_info()
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -337,8 +370,10 @@ class ProgressRenderer:
             self._thread.join(timeout=2)
             self._thread = None
             self._render(final=True)
+            self._restore_console_levels()
         elif self._enabled:
             self._render(final=True)
+            self._restore_console_levels()
 
     def _loop(self):
         while not self._stop.wait(self.interval):
@@ -348,6 +383,26 @@ class ProgressRenderer:
         text = build_panel(self.tracker.snapshot(), final=final)
         self.stream.write("\033[H\033[2J" + text + "\n")
         self.stream.flush()
+
+    def _console_handlers(self):
+        logger = logging.getLogger("kbimporter")
+        return [
+            h for h in logger.handlers
+            if isinstance(h, logging.StreamHandler)
+            and h.stream in (sys.stdout, sys.stderr)
+        ]
+
+    def _suppress_console_info(self):
+        """面板运行期间把控制台 INFO 日志压到 WARNING，避免进度行插进面板。"""
+        self._saved_handler_levels = []
+        for handler in self._console_handlers():
+            self._saved_handler_levels.append((handler, handler.level))
+            handler.setLevel(logging.WARNING)
+
+    def _restore_console_levels(self):
+        for handler, level in getattr(self, "_saved_handler_levels", []):
+            handler.setLevel(level)
+        self._saved_handler_levels = []
 
 
 tracker = ProgressTracker()
