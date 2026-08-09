@@ -264,8 +264,8 @@ def build_panel(snapshot: dict, final: bool = False, width: int = 96) -> str:
             "queued": "准备",
             "running": "识别中",
             "done": "识别完成",
-            "failed": "失败",
-            "skipped": "跳过",
+            "failed": "failed",
+            "skipped": "skipped",
         }.get(fp["status"], fp["status"])
         subtask = (
             f"{fp['subtask_completed']}/{fp['subtask_total']}"
