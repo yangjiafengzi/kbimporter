@@ -529,6 +529,9 @@ kb ocr keys                                    # 查看各 provider 密钥是否
 多个子任务，按 `[cloud_ocr.paddle].max_workers` / `[cloud_ocr.mineru].max_workers`
 （默认 5）持续并发解析：任意一个子任务完成，线程池立刻补下一个，不会等整批完成；
 结果仍按页序合并；任一子任务失败（尤其额度耗尽）会取消未启动的任务并通知运行中的任务退出。
+多个 PDF 文件之间也支持并发：`[cloud_ocr].max_files_workers`（默认 2）控制同时处理的
+文件数，每个文件内部仍按 `max_workers` 跑子任务；总并发约为“文件数 × 子任务并发”，
+实际使用时注意别设太大，避免触发 503。
 轮询进度超过 `stall_timeout`（默认 900 秒）不增长时判定任务卡死，自动重新提交，
 重试耗尽后再切换通道。
 
@@ -612,7 +615,8 @@ kb convert --engine cloud --dry-run
 - `[paths].kb_root`：知识库根目录（也可用环境变量 `KB_ROOT`）
 - `[paths].state_db`：增量状态库；老版本用户可直接指向旧 `import_state.db` 继续增量
 - `[converter].engines`：OCR 引擎回退链
-- `[cloud_ocr]`：云端 OCR 开关、provider 与 `fallback_providers` 回退链
+- `[cloud_ocr]`：云端 OCR 开关、provider、`fallback_providers` 回退链与
+  `max_files_workers` 文件级并发
 - `[cloud_ocr.paddle]` / `[cloud_ocr.mineru]`：云端 API 参数（模型版本、OCR 开关、
   页数上限、子任务并发数 `max_workers`、卡死判定 `stall_timeout` 等）
 - `[milvus]`：Milvus 地址与 embedding 配置

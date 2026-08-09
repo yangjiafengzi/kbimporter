@@ -80,6 +80,7 @@ enabled = false
 provider = "paddle"
 # 主 provider 失败后依次尝试的备选（需要对应密钥）
 fallback_providers = ["mineru"]
+max_files_workers = 2
 state_dir = ""
 
 [cloud_ocr.paddle]

@@ -161,6 +161,8 @@ def test_cloud_ocr_concurrency_timeout_parse(tmp_path: Path):
     cfg_file.write_text(
         """[paths]
 kb_root = "C:/tmp/kb"
+[cloud_ocr]
+max_files_workers = 3
 [cloud_ocr.paddle]
 max_workers = 4
 stall_timeout = 600
@@ -171,6 +173,7 @@ stall_timeout = 1200
         encoding="utf-8",
     )
     loaded = load_config(cfg_file)
+    assert loaded.cloud_ocr.max_files_workers == 3
     assert loaded.cloud_ocr.paddle.max_workers == 4
     assert loaded.cloud_ocr.paddle.stall_timeout == 600
     assert loaded.cloud_ocr.mineru.max_workers == 3

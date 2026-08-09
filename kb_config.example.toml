@@ -81,6 +81,7 @@ replace_existing_md = "ocr_only"
 enabled = false
 provider = "paddle"   # paddle（首选，PaddleOCR 云 API）/ mineru / baidu / openai
 fallback_providers = ["mineru"]   # 主 provider 失败后依次尝试的备选（需对应密钥）
+max_files_workers = 2   # 多个 PDF 文件之间的并发数（每个文件内部还有子任务并发）
 state_dir = ""        # 断点续传状态目录，默认: <state_dir>/cloud_ocr
 
 [cloud_ocr.paddle]

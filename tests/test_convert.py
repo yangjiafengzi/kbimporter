@@ -275,6 +275,37 @@ def test_retry_engines_skips_marker_when_already_batched(cfg: Config, monkeypatc
     assert success == 0
 
 
+def test_process_retry_engines_file_level_concurrency(cfg: Config, monkeypatch):
+    import threading
+
+    d = cfg.project_root / "p"
+    d.mkdir(parents=True)
+    pdfs = []
+    for name in ("a.pdf", "b.pdf"):
+        p = d / name
+        p.write_bytes(b"pdf")
+        pdfs.append(p)
+    cfg.cloud_ocr.enabled = True
+    cfg.cloud_ocr.max_files_workers = 2
+    cfg.engines = ["cloud"]
+    barrier = threading.Barrier(2)
+
+    def fake_cloud(cfg_, pdf_path, dest_md, dry_run=False, logger=None):
+        barrier.wait(timeout=5)  # 两个文件必须同时被处理，否则 barrier 超时
+        Path(dest_md).write_text(f"md {Path(dest_md).stem}", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(convert, "write_cloud_ocr_md", fake_cloud)
+    success = convert.process_retry_engines(
+        cfg.ocr_work_dir / "lost", cfg.scan_dir, cfg, dry_run=False,
+        failed_files=[], log=convert.logging.getLogger("t"),
+        pending_pdfs=pdfs,
+    )
+    assert success == 2
+    assert (d / "a.md").read_text(encoding="utf-8") == "md a"
+    assert (d / "b.md").read_text(encoding="utf-8") == "md b"
+
+
 def test_run_with_kill_success():
     assert convert.run_with_kill([sys.executable, "-c", "print('ok')"], timeout=10) == 0
 

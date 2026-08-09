@@ -6,14 +6,19 @@ import os
 import shutil
 import stat
 import subprocess
+import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from kbimporter.cloud_ocr import write_cloud_ocr_md
 from kbimporter.config import Config
 from kbimporter.scanner import init_db, set_origin
 from kbimporter.util import ensure_dir, move_to_trash, remove_file, sha256_file
+
+
+_origin_lock = threading.Lock()
 
 
 def kill_process_tree(pid: int):
@@ -38,16 +43,17 @@ def kill_process_tree(pid: int):
 
 def _record_ocr_origin(cfg: Config, md_path: Path):
     """把转换产物记录为 ocr_md 来源，供 dedupe 的 ocr_only 替换策略识别。"""
-    try:
-        conn = init_db(cfg.state_db)
+    with _origin_lock:
         try:
-            set_origin(conn, str(md_path), "ocr_md", sha256_file(md_path))
-        finally:
-            conn.close()
-    except Exception:
-        logging.getLogger("kbimporter").warning(
-            f"记录 OCR 来源失败（不影响转换结果）: {md_path}"
-        )
+            conn = init_db(cfg.state_db)
+            try:
+                set_origin(conn, str(md_path), "ocr_md", sha256_file(md_path))
+            finally:
+                conn.close()
+        except Exception:
+            logging.getLogger("kbimporter").warning(
+                f"记录 OCR 来源失败（不影响转换结果）: {md_path}"
+            )
 
 
 def _force_rmtree(path: Path):
@@ -330,8 +336,8 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
                     log.warning(f"    云端预演失败（{e}），将按通用流程处理")
         return len(items)
 
-    success = 0
-    for idx, (dir_rel, pdf_path) in enumerate(items, 1):
+    def process_item(idx: int, dir_rel: Path, pdf_path: Path) -> bool:
+        """处理单个 PDF 的完整引擎链，返回是否成功（线程安全，不碰共享失败列表）。"""
         original_dir = scan_dir / dir_rel
         base_name = pdf_path.stem
         dest_md = original_dir / f"{base_name}.md"
@@ -365,7 +371,9 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
                     log.info("    云端 OCR 未在配置中启用，跳过")
                     continue
                 try:
-                    ok = write_cloud_ocr_md(cfg, pdf_path, dest_md, dry_run=False, logger=log)
+                    ok = write_cloud_ocr_md(
+                        cfg, pdf_path, dest_md, dry_run=False, logger=log
+                    )
                 except Exception as e:
                     log.warning(f"    云端 OCR 失败: {e}")
                     ok = False
@@ -376,7 +384,6 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
                     shutil.move(str(produced_md), str(dest_md))
                 _record_ocr_origin(cfg, dest_md)
                 log.info(f"    成功 ({engine}): {dest_md.name}")
-                failed_files[:] = [f for f in failed_files if not f.endswith(pdf_path.name)]
                 if pdf_path.parent == lost_dir or lost_dir in pdf_path.parents:
                     pdf_path.unlink(missing_ok=True)
                     try:
@@ -385,14 +392,43 @@ def process_retry_engines(lost_dir: Path, scan_dir: Path, cfg: Config,
                         pass
                 else:
                     _dispose_original(pdf_path, cfg, dry_run=False, log=log)
-                success += 1
-                break
-        else:
-            log.warning(f"    全部引擎失败: {pdf_path.name}")
-            failed_files.append(str(dir_rel / pdf_path.name))
+                for d in cleanup_dirs:
+                    if d.is_dir():
+                        shutil.rmtree(str(d), ignore_errors=True)
+                return True
         for d in cleanup_dirs:
             if d.is_dir():
                 shutil.rmtree(str(d), ignore_errors=True)
+        log.warning(f"    全部引擎失败: {pdf_path.name}")
+        return False
+
+    file_workers = (
+        cfg.cloud_ocr.max_files_workers
+        if cfg.cloud_ocr.enabled
+        and "cloud" in cfg.engines
+        and cfg.cloud_ocr.max_files_workers > 1
+        else 1
+    )
+    if file_workers > 1:
+        log.info(f"[阶段3] 文件级并发数: {file_workers}")
+        with ThreadPoolExecutor(max_workers=file_workers) as pool:
+            futures = [
+                pool.submit(process_item, idx, dir_rel, pdf_path)
+                for idx, (dir_rel, pdf_path) in enumerate(items, 1)
+            ]
+            results = [f.result() for f in futures]
+    else:
+        results = [
+            process_item(idx, dir_rel, pdf_path)
+            for idx, (dir_rel, pdf_path) in enumerate(items, 1)
+        ]
+    success = sum(1 for r in results if r)
+    for (dir_rel, pdf_path), ok in zip(items, results):
+        rel = str(dir_rel / pdf_path.name)
+        if ok:
+            failed_files[:] = [f for f in failed_files if f != rel]
+        elif rel not in failed_files:
+            failed_files.append(rel)
     log.info(f"[阶段3] 重试完成: {success}/{len(items)} 成功")
     return success
 

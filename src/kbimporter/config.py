@@ -113,6 +113,7 @@ class CloudOCRConfig:
     enabled: bool = False
     provider: str = "paddle"  # paddle（首选，PaddleOCR 云 API） | mineru | baidu | openai
     fallback_providers: list[str] = field(default_factory=list)
+    max_files_workers: int = 2
     state_dir: Path | None = None
     openai: OpenAICompatibleOCR = field(default_factory=OpenAICompatibleOCR)
     baidu: BaiduOCR = field(default_factory=BaiduOCR)
@@ -345,6 +346,8 @@ class Config:
             cfg.cloud_ocr.fallback_providers = [
                 str(x) for x in cloud["fallback_providers"]
             ]
+        if cloud.get("max_files_workers") is not None:
+            cfg.cloud_ocr.max_files_workers = int(cloud["max_files_workers"])
         if cloud.get("state_dir"):
             cfg.cloud_ocr.state_dir = Path(str(cloud["state_dir"]))
         oai = cloud.get("openai", {})

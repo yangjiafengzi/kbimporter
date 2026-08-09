@@ -111,7 +111,8 @@ src/kbimporter/
 
 `enabled`（默认 false，必须显式开启）/ `provider`（`paddle` 首选 /
 `mineru` / `baidu` / `openai`）/ `fallback_providers`（主 provider 失败后
-依次尝试的备选，如 `["mineru"]`）/ `state_dir`。
+依次尝试的备选，如 `["mineru"]`）/ `max_files_workers`（多个 PDF 文件之间的并发数，
+默认 2）/ `state_dir`。
 
 #### `[cloud_ocr.paddle]`
 
