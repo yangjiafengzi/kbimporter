@@ -251,7 +251,7 @@ def build_panel(snapshot: dict, final: bool = False, width: int = 96) -> str:
         f"耗时 {format_duration(snapshot['elapsed'])}",
         "-" * width,
         _pad_display("文件", 40)
-        + _pad_display("状态", 10)
+        + _pad_display("状态", 12)
         + _pad_display("子任务", 8)
         + _pad_display("页", 12)
         + _pad_display("通道", 10),
@@ -261,9 +261,9 @@ def build_panel(snapshot: dict, final: bool = False, width: int = 96) -> str:
     for fp in shown:
         name = _truncate_middle(fp["name"], 38)
         status = {
-            "queued": "准备",
-            "running": "识别中",
-            "done": "识别完成",
+            "queued": "preparing",
+            "running": "recognizing",
+            "done": "done",
             "failed": "failed",
             "skipped": "skipped",
         }.get(fp["status"], fp["status"])
@@ -278,7 +278,7 @@ def build_panel(snapshot: dict, final: bool = False, width: int = 96) -> str:
         )
         lines.append(
             _pad_display(name, 40)
-            + _pad_display(status, 10)
+            + _pad_display(status, 12)
             + _pad_display(subtask, 8)
             + _pad_display(pages, 12)
             + _pad_display(fp["provider"], 10)

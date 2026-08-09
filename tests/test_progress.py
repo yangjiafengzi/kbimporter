@@ -47,15 +47,15 @@ def test_finish_subtask_ignores_duplicate_tag():
     assert snap["files"][0]["pages_completed"] == 10
 
 
-def test_build_panel_uses_chinese_states():
+def test_build_panel_uses_english_states():
     t = ProgressTracker()
     t.set_current("x.pdf")
     t.file_queued("x.pdf")
-    assert "准备" in build_panel(t.snapshot())
+    assert "preparing" in build_panel(t.snapshot())
     t.file_started("x.pdf")
-    assert "识别中" in build_panel(t.snapshot())
+    assert "recognizing" in build_panel(t.snapshot())
     t.file_finished("x.pdf", True)
-    assert "识别完成" in build_panel(t.snapshot())
+    assert "done" in build_panel(t.snapshot())
 
 
 def test_tracker_alert_and_reset():
@@ -106,7 +106,7 @@ def test_panel_rows_align_by_display_width():
     t.start_subtask("1/2", "mineru", "b1")
     panel = build_panel(t.snapshot())
     row = panel.splitlines()[3]
-    # 每列都按显示宽度补齐：文件40 + 状态10 + 子任务8 + 页12 + 通道10
-    assert _display_width(row) == 80
+    # 每列都按显示宽度补齐：文件40 + 状态12 + 子任务8 + 页12 + 通道10
+    assert _display_width(row) == 82
     assert _pad_display("中央", 4) == "中央"
     assert _pad_display("ab", 4) == "ab  "
