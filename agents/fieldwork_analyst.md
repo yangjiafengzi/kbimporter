@@ -55,6 +55,7 @@
 > ⚠️ **检索前**：若 Collection 未加载，先调用 `milvus_load_collection(collection_name=...)`。
 > ⚠️ **禁用**：`milvus_vector_search` 与 `milvus_hybrid_search` 需要外部嵌入工具生成查询向量，本环境没有，调用必然失败，一律不得使用。
 > ⚠️ **过滤**：`milvus_text_search` 不支持 `filter_expr`；需要过滤的 BM25 一律用 `milvus_text_similarity_search(..., anns_field="sparse", metric_type="BM25", filter_expr=...)`。
+> ⚠️ **信息源边界**：本提示词只允许使用 `fieldwork_kb` 检索到的资料。即使客户端配置了 Sciverse、联网搜索等外部检索工具，也不得调用；模型自身知识与外部文献一律不得混入回答。
 
 ---
 
