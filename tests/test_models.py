@@ -4,6 +4,8 @@ import re
 import sys
 import types
 
+import pytest
+
 from kbimporter import models
 
 
@@ -152,3 +154,43 @@ def test_milvus_collection_crud_wrapper(cfg, monkeypatch):
     coll.delete(expr="source_file == 'a.md'")
     assert coll.num_entities == 0
     coll.flush()
+
+
+def test_tcp_reachable(monkeypatch):
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(models.socket, "create_connection", lambda addr, timeout: _Conn())
+    assert models.tcp_reachable("localhost", 19530, 2.0) is True
+
+    def _fail(*a, **k):
+        raise OSError("down")
+
+    monkeypatch.setattr(models.socket, "create_connection", _fail)
+    assert models.tcp_reachable("localhost", 19530, 2.0) is False
+
+
+def test_get_client_unreachable_raises_friendly(cfg, monkeypatch):
+    _install_fake_pymilvus(monkeypatch)
+    monkeypatch.setattr(models, "_tcp_reachable", lambda cfg, timeout=2.0: False)
+    with pytest.raises(RuntimeError, match="无法连接 Milvus"):
+        models.get_client(cfg)
+
+
+def test_get_client_constructor_error_raises_friendly(cfg, monkeypatch):
+    _install_fake_pymilvus(monkeypatch)
+    monkeypatch.setattr(models, "_tcp_reachable", lambda cfg, timeout=2.0: True)
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            raise OSError("grpc unavailable")
+
+    fake = types.ModuleType("pymilvus")
+    fake.MilvusClient = _Boom
+    monkeypatch.setattr(models, "_pm", lambda: fake)
+    with pytest.raises(RuntimeError, match="连接 Milvus 失败"):
+        models.get_client(cfg)

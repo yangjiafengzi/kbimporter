@@ -14,6 +14,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from datetime import datetime, timezone
 from pathlib import Path
 
 from kbimporter.config import Config
@@ -22,7 +23,7 @@ from kbimporter.util import ensure_dir
 
 
 class CloudQuotaError(RuntimeError):
-    """云端 OCR 当日额度耗尽（如 PaddleOCR 429 / MinerU -60018）。
+    """云端 OCR 当日额度耗尽（响应体明确标记，如 MinerU -60018 / “额度已用完”）。
 
     重试无意义，应跳过当前 provider 的内部重试，立即切换到下一个通道。
     """
@@ -32,16 +33,83 @@ class JobCancelledError(RuntimeError):
     """并发子任务因其他子任务失败或额度耗尽而被取消。"""
 
 
-def _looks_like_quota_error(status_code: int | None = None, text: str = "",
-                            quota_codes: tuple[str, ...] = ()) -> bool:
-    """只有 HTTP 429 或明确的额度错误码（如 MinerU -60018）才算额度耗尽。
+_QUOTA_TEXT_KEYWORDS = (
+    "额度已用完", "配额已用完", "配额不足", "余额不足", "欠费",
+    "解析额度", "超出单日解析最大页数", "单日解析最大页数",
+    "解析量已达上限", "解析量超过",
+    "quota exceeded", "daily quota", "quota exhausted",
+)
 
-    普通错误（500/503/504、文件损坏、解析失败等）一律返回 False，走正常重试。
+_RATE_LIMIT_TEXT_KEYWORDS = (
+    "12002", "请求频率过高", "频率过高", "请稍后重试",
+    "too many requests", "rate limit",
+)
+
+
+def _looks_like_quota_error(status_code: int | None = None, text: str = "",
+                            quota_codes: tuple[str, ...] = (),
+                            quota_keywords: tuple[str, ...] = ()) -> bool:
+    """只有响应体出现明确额度错误码/关键词才算额度耗尽。
+
+    裸 HTTP 429 不是额度耗尽（通常是限流），应走退避重试；
+    普通错误（500/503/504、文件损坏、解析失败等）也一律返回 False。
     """
+    lower = (text or "").lower()
+    return (
+        any(code.lower() in lower for code in quota_codes)
+        or any(kw.lower() in lower for kw in quota_keywords)
+    )
+
+
+def _is_rate_limit(status_code: int | None = None, text: str = "",
+                   rate_limit_codes: tuple[str, ...] = (),
+                   rate_limit_keywords: tuple[str, ...] = ()) -> bool:
+    """判断是否为可退避重试的限流（HTTP 429 / 请求频率过高）。"""
     if status_code == 429:
         return True
     lower = (text or "").lower()
-    return any(code.lower() in lower for code in quota_codes)
+    return (
+        any(code.lower() in lower for code in rate_limit_codes)
+        or any(kw.lower() in lower for kw in rate_limit_keywords)
+    )
+
+
+def _retry_after_seconds(resp) -> float | None:
+    """解析 HTTP Retry-After 头（秒数或 HTTP 日期），解析失败返回 None。"""
+    headers = getattr(resp, "headers", None) or {}
+    value = headers.get("Retry-After") or headers.get("retry-after")
+    if not value:
+        return None
+    value = str(value).strip()
+    try:
+        seconds = float(value)
+        return seconds if seconds >= 0 else None
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(value)
+        if dt is None:
+            return None
+        return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+    except Exception:
+        return None
+
+
+_paddle_submit_lock = threading.Lock()
+_last_paddle_submit_ts = 0.0
+_PADDLE_SUBMIT_MIN_INTERVAL = 0.5
+
+
+def _throttle_paddle_submit():
+    """全局限制 PaddleOCR 提交频率，降低触发服务端限流的概率。"""
+    global _last_paddle_submit_ts
+    with _paddle_submit_lock:
+        now = time.monotonic()
+        wait = _PADDLE_SUBMIT_MIN_INTERVAL - (now - _last_paddle_submit_ts)
+        if wait > 0:
+            time.sleep(wait)
+        _last_paddle_submit_ts = time.monotonic()
 
 
 _QUOTA_EXHAUSTED: set[str] = set()
@@ -62,9 +130,16 @@ def _clear_quota_flags():
 
 def _fitz():
     try:
-        import fitz
+        import pymupdf as fitz
     except ImportError:
-        raise RuntimeError("缺少依赖 PyMuPDF：pip install kbimporter[sync] 或 pip install PyMuPDF")
+        try:
+            import fitz
+        except ImportError:
+            raise RuntimeError("缺少依赖 PyMuPDF：pip install kbimporter[sync] 或 pip install PyMuPDF")
+    try:
+        fitz.TOOLS.mupdf_display_errors(False)
+    except Exception:
+        pass
     return fitz
 
 
@@ -248,17 +323,39 @@ def _paddle_submit(cfg: Config, pdf_path: str | Path,
     last_err: Exception | None = None
     for attempt in range(1, pdl.max_retries + 1):
         try:
+            _throttle_paddle_submit()
             with open(pdf_path, "rb") as f:
                 files = {"file": (Path(pdf_path).name, f)}
                 resp = requests.post(
                     pdl.job_url, headers=headers, data=data, files=files,
                     timeout=pdl.timeout,
                 )
-            if _looks_like_quota_error(resp.status_code, resp.text):
+            if _looks_like_quota_error(
+                resp.status_code, resp.text, quota_keywords=_QUOTA_TEXT_KEYWORDS
+            ):
                 raise CloudQuotaError(
-                    f"PaddleOCR 当日解析额度已用完（HTTP {resp.status_code}）: "
+                    f"PaddleOCR 当日解析额度已用完: {resp.text[:300]}"
+                )
+            if _is_rate_limit(
+                resp.status_code, resp.text,
+                rate_limit_keywords=_RATE_LIMIT_TEXT_KEYWORDS,
+            ):
+                retry_after = _retry_after_seconds(resp)
+                delay = (
+                    retry_after if retry_after is not None
+                    else min(2 ** (attempt + 1), 60)
+                )
+                log.warning(
+                    f"  PaddleOCR{tag} 提交第 {attempt} 次被限流"
+                    f"（HTTP {resp.status_code}），{delay:.0f}s 后重试"
+                )
+                last_err = RuntimeError(
+                    f"PaddleOCR 请求频率过高（HTTP {resp.status_code}）: "
                     f"{resp.text[:300]}"
                 )
+                if attempt < pdl.max_retries:
+                    time.sleep(delay)
+                continue
             if resp.status_code == 200:
                 job_id = resp.json()["data"]["jobId"]
                 log.info(f"PaddleOCR 云任务已提交{tag}: jobId={job_id}")
@@ -295,11 +392,24 @@ def _paddle_poll(cfg: Config, job_id: str, log: logging.Logger,
         resp = requests.get(
             f"{pdl.job_url}/{job_id}", headers=headers, timeout=pdl.timeout
         )
-        if _looks_like_quota_error(resp.status_code, resp.text):
+        if _looks_like_quota_error(
+            resp.status_code, resp.text, quota_keywords=_QUOTA_TEXT_KEYWORDS
+        ):
             raise CloudQuotaError(
-                f"PaddleOCR 当日解析额度已用完（HTTP {resp.status_code}）: "
-                f"{resp.text[:300]}"
+                f"PaddleOCR 当日解析额度已用完: {resp.text[:300]}"
             )
+        if _is_rate_limit(
+            resp.status_code, resp.text,
+            rate_limit_keywords=_RATE_LIMIT_TEXT_KEYWORDS,
+        ):
+            retry_after = _retry_after_seconds(resp)
+            delay = retry_after if retry_after is not None else pdl.poll_interval
+            log.warning(
+                f"PaddleOCR{tag} 轮询被限流（HTTP {resp.status_code}），"
+                f"{delay:.0f}s 后重试"
+            )
+            time.sleep(delay)
+            continue
         if resp.status_code >= 400:
             raise RuntimeError(
                 f"PaddleOCR{tag} 轮询请求失败: HTTP {resp.status_code} "
@@ -615,12 +725,34 @@ def _mineru_apply_upload(cfg: Config, pdf_path: str | Path,
                 mnr.upload_url, headers=headers, json=payload, timeout=mnr.timeout
             )
             if _looks_like_quota_error(
-                resp.status_code, resp.text, quota_codes=("60018",)
+                resp.status_code, resp.text,
+                quota_codes=("60018",),
+                quota_keywords=_QUOTA_TEXT_KEYWORDS,
             ):
                 raise CloudQuotaError(
-                    f"MinerU 当日解析额度已用完（HTTP {resp.status_code}）: "
+                    f"MinerU 当日解析额度已用完: {resp.text[:300]}"
+                )
+            if _is_rate_limit(
+                resp.status_code, resp.text,
+                rate_limit_codes=("12002",),
+                rate_limit_keywords=_RATE_LIMIT_TEXT_KEYWORDS,
+            ):
+                retry_after = _retry_after_seconds(resp)
+                delay = (
+                    retry_after if retry_after is not None
+                    else min(2 ** (attempt + 1), 60)
+                )
+                log.warning(
+                    f"  MinerU{tag} 申请上传链接第 {attempt} 次被限流"
+                    f"（HTTP {resp.status_code}），{delay:.0f}s 后重试"
+                )
+                last_err = RuntimeError(
+                    f"MinerU 请求频率过高（HTTP {resp.status_code}）: "
                     f"{resp.text[:300]}"
                 )
+                if attempt < mnr.max_retries:
+                    time.sleep(delay)
+                continue
             data = resp.json() if resp.status_code == 200 else {}
             if resp.status_code == 200 and data.get("code") == 0:
                 batch_id = data["data"]["batch_id"]
@@ -691,12 +823,26 @@ def _mineru_poll(cfg: Config, batch_id: str, log: logging.Logger,
             f"{mnr.result_url}/{batch_id}", headers=headers, timeout=mnr.timeout
         )
         if _looks_like_quota_error(
-            resp.status_code, resp.text, quota_codes=("60018",)
+            resp.status_code, resp.text,
+            quota_codes=("60018",),
+            quota_keywords=_QUOTA_TEXT_KEYWORDS,
         ):
             raise CloudQuotaError(
-                f"MinerU 当日解析额度已用完（HTTP {resp.status_code}）: "
-                f"{resp.text[:300]}"
+                f"MinerU 当日解析额度已用完: {resp.text[:300]}"
             )
+        if _is_rate_limit(
+            resp.status_code, resp.text,
+            rate_limit_codes=("12002",),
+            rate_limit_keywords=_RATE_LIMIT_TEXT_KEYWORDS,
+        ):
+            retry_after = _retry_after_seconds(resp)
+            delay = retry_after if retry_after is not None else mnr.poll_interval
+            log.warning(
+                f"MinerU{tag} 轮询被限流（HTTP {resp.status_code}），"
+                f"{delay:.0f}s 后重试"
+            )
+            time.sleep(delay)
+            continue
         if resp.status_code >= 400:
             raise RuntimeError(
                 f"MinerU{tag} 轮询请求失败: HTTP {resp.status_code} "
@@ -725,7 +871,11 @@ def _mineru_poll(cfg: Config, batch_id: str, log: logging.Logger,
             return zip_url
         if state == "failed":
             err_msg = item.get("err_msg") or item.get("errMsg") or ""
-            if _looks_like_quota_error(None, err_msg, quota_codes=("60018",)):
+            if _looks_like_quota_error(
+                None, err_msg,
+                quota_codes=("60018",),
+                quota_keywords=_QUOTA_TEXT_KEYWORDS,
+            ):
                 raise CloudQuotaError(f"MinerU 云任务失败（额度/上限）: {err_msg}")
             raise RuntimeError(
                 f"MinerU 云任务失败: {err_msg or '未知原因'}"

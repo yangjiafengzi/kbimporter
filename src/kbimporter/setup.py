@@ -168,7 +168,7 @@ def run_setup(cfg: Config, logger: logging.Logger | None = None,
 
     # 第 0 步：先扫描本机环境，再决定装什么
     log.info("第 0 步：扫描本机环境...")
-    from kbimporter.doctor import run_doctor
+    from kbimporter.doctor import python_ocr_warning, run_doctor
     run_doctor(cfg, logger=log)
 
     project_root = _project_root()
@@ -180,6 +180,10 @@ def run_setup(cfg: Config, logger: logging.Logger | None = None,
         print_engine_guidance(gpu, cfg, log)
         scheme = _ask_ocr_scheme()
         extras = scheme_extras(scheme)
+        if scheme in ("1", "3"):
+            ocr_warning = python_ocr_warning()
+            if ocr_warning:
+                log.warning(ocr_warning)
         log.info(
             f"按当前方案安装 extras: [{','.join(extras)}]"
             + ("（含本地转换引擎 marker-pdf，体积较大）" if scheme in ("1", "3") else "")
@@ -220,6 +224,9 @@ def run_setup(cfg: Config, logger: logging.Logger | None = None,
             log.info("以后想开启云端 OCR：编辑 kb_config.toml 把 [cloud_ocr] enabled 改为 true 并设置 PADDLE_OCR_API_KEY。")
     else:
         log.info("非交互模式：仅打印引导信息。")
+        ocr_warning = python_ocr_warning()
+        if ocr_warning:
+            log.warning(ocr_warning)
         status = venv_status(venv_dir)
         local_hint = _pip_hint(venv_dir, scheme_extras("1"))
         cloud_hint = _pip_hint(venv_dir, scheme_extras("2"))

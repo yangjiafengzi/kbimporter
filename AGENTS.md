@@ -131,9 +131,12 @@ max_pages_per_task = 100
 流程：超过 `max_pages_per_task` 页时先按页拆分子 PDF -> 各子任务 multipart 提交 ->
 轮询 jobId -> 下载 JSONL -> 解析 `layoutParsingResults[].markdown.text` ->
 按页缓存并按页序合并。断点续传：已完成子任务不重复提交。
-额度规则：每模型每日 3000 页，超限返回 429——识别到 429 立即抛 `CloudQuotaError`，
-跳过重试并切换到下一个 provider，且本次运行剩余文件直接跳过该 provider；
-除 429 外所有错误（500/503/504、解析失败等）一律先按退避重试，重试耗尽后才回退。
+额度规则：每模型每日 3000 页。HTTP 429 需按响应体区分：`code=12002` /
+“请求频率过高，请稍后重试”是**限流**，按 `Retry-After` 或指数退避重试，不切换
+provider；响应体出现“超出单日解析最大页数 / 额度已用完 / 配额不足 / 余额不足”等
+明确额度字样（或 MinerU `-60018`）才抛 `CloudQuotaError` 并熔断切换，且本次运行
+剩余文件直接跳过该 provider。其他错误（500/503/504、解析失败等）一律先按退避重试，
+重试耗尽后才回退。
 子任务按 `max_workers`（默认 5）持续并发（完成一个立刻补下一个），
 任一失败/额度耗尽即取消未启动任务并通知运行中任务退出；
 `stall_timeout`（默认 900s）内进度不增长判定卡死并重新提交。
@@ -159,7 +162,8 @@ max_pages_per_task = 200
 流程：申请上传链接 -> PUT 上传整份 PDF -> 轮询 `extract-results/batch/{batch_id}`
 -> 下载结果 zip 并解出 `full.md`。超过 `max_pages_per_task` 页时自动拆分多个
 子任务，识别完成后按页序合并；断点续传，已完成子任务不重复提交。
-日额度错误（`-60018`/429）同样映射为 `CloudQuotaError` 并立即切换通道；
+日额度错误（`-60018`，或响应体明确额度字样）映射为 `CloudQuotaError` 并立即切换通道；
+429 限流（请求频率过高）同样按退避重试处理；
 子任务并发与 `stall_timeout` 卡死检测行为同 PaddleOCR。
 
 #### `[cloud_ocr.baidu]`
@@ -173,7 +177,8 @@ OpenAI 兼容视觉接口（默认 DashScope qwen3-vl-plus），每请求可包�
 ## 五、命令详细说明
 
 所有命令支持 `--config <路径>`（默认读取当前目录 `kb_config.toml`），
-也可用 `KB_ROOT` 环境变量指定知识库根目录。
+也可用 `KB_ROOT` 环境变量指定知识库根目录。`--config` 是全局参数，放在
+子命令前后均可：`kb --config <路径> doctor` 与 `kb doctor --config <路径>` 等价。
 
 ### `kb init`
 
@@ -183,12 +188,18 @@ kb init --root <知识库路径> [--output <配置路径>] [--interactive] [--fo
 
 生成 `kb_config.toml` 并创建 `zotero文献库/library`、`项目文献`、
 `田野调查笔记`、`.kb` 目录。终端交互模式询问显卡并推荐 OCR 方案。
+自动读取 Zotero `prefs.js` 的 `extensions.zotero.dataDir`，检测到自定义
+数据目录时把 `[paths].zotero_storage` 填为 `<dataDir>/storage`。
 
 ### `kb status` / `kb scan` / `kb doctor`
 
 三者默认均只读。`doctor` 会探测当前解释器之外的其他 Python 环境
 （miniconda base、conda envs、系统 Python），报告依赖可复用情况；
 环境变量提示按 `cloud_ocr.provider` 精准给出。
+`doctor` / `status` 会检测 Zotero 自定义数据目录，与配置不一致时给出警告。
+Milvus 只报 TCP 可达性，默认标注“向量化链路未验证，请运行 `kb doctor --deep`”，
+并提示服务端 `MILVUSAI_DASHSCOPE_API_KEY` 检查点；Python 3.13+ 时提示本地
+OCR 重型依赖可能缺少预编译 wheel。
 `kb doctor --deep` 是显式写操作：临时创建并删除 `_probe_kbimporter` 集合，
 用于端到端嵌入体检，只碰该临时集合。
 
@@ -198,6 +209,17 @@ kb init --root <知识库路径> [--output <配置路径>] [--interactive] [--fo
 按方案安装对应 extras：核心 `[import,sync,dedupe]` 始终安装，本地/混合
 加 `[ocr]`，云端/混合加 `[cloud]`；随后按需创建、复用虚拟环境或补装
 依赖，可自动写入配置。非交互模式只打印按方案安装的命令提示。
+Python 3.13+ 且选择本地 OCR 时提示改用 3.11/3.12 或云端 OCR。
+
+### `kb shell-init`
+
+```bash
+kb shell-init [--apply] [--config <路径>]
+```
+
+一键生成“全局命令 + 全局配置”的 shell 启动项：打印需加入 `~/.zshrc` /
+`~/.bash_profile`（Windows 为 PowerShell `$PROFILE`）的内容；`--apply`
+自动写入（幂等）。macOS/Linux 的软链命令只打印、不自动执行。
 
 ### `kb import`
 
@@ -208,7 +230,9 @@ kb init --root <知识库路径> [--output <配置路径>] [--interactive] [--fo
 ### `kb sync-zotero`
 
 按基础名分组，选中文比例最低的版本（原版）复制到文献库；清理过期记录。
-删除操作进回收目录。
+删除操作进回收目录。无可提取文字层的 PDF 标记为“无文字层（疑似扫描件）”，
+不参与“中文比例最低=原文”的判定（同一文献优先选文字版），同步结束输出
+扫描件清单；历史记录新增 `has_text` 字段（旧记录缺省视为有文字层）。
 
 ### `kb convert`
 
@@ -243,6 +267,9 @@ kb ocr mode local
 
 MinerU 云端需要设置环境变量 `MINERU_API_KEY`（由 `[cloud_ocr.mineru].api_key_env`
 指定），密钥不写入配置或代码。`kb ocr keys` / `kb doctor` 可检查是否已设置。
+`kb ocr keys` 在 Windows 检查注册表用户/系统作用域；macOS/Linux 检测
+`~/.zshrc` / `~/.zshenv` / `~/.bash_profile` / `~/.bashrc` / `~/.profile`
+及 fish `config.fish` 中的 `export KEY=...` / `set -gx KEY ...`。
 
 ### `kb dedupe`
 

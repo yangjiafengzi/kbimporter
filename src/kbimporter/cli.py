@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
 from kbimporter import __version__
 from kbimporter.config import DEFAULT_CONFIG_FILE, Config, load_config
 from kbimporter.util import setup_logging
+from kbimporter.zotero_sync import detect_zotero_storage
 
 
 DEFAULT_CONFIG_TEMPLATE = """\
@@ -143,6 +145,12 @@ def _config(args) -> "Config":
     return load_config(getattr(args, "config", None))
 
 
+def _add_config_arg(parser: argparse.ArgumentParser):
+    """子命令级 --config：SUPPRESS 默认值，避免覆盖全局 --config。"""
+    parser.add_argument("--config", "-c", default=argparse.SUPPRESS,
+                        help="配置文件路径")
+
+
 def cmd_init(args):
     out = Path(args.output).resolve() if args.output else Path(DEFAULT_CONFIG_FILE).resolve()
     if out.exists() and not args.force:
@@ -161,7 +169,20 @@ def cmd_init(args):
         from kbimporter.setup import _ask_gpu
         gpu = _ask_gpu()
     toml_root = kb_root.replace("\\", "/") if kb_root else ""
-    out.write_text(DEFAULT_CONFIG_TEMPLATE.format(kb_root=toml_root), encoding="utf-8")
+    toml_text = DEFAULT_CONFIG_TEMPLATE.format(kb_root=toml_root)
+    zotero_storage, zotero_custom = detect_zotero_storage()
+    if zotero_storage:
+        if zotero_custom:
+            escaped = str(zotero_storage).replace("\\", "\\\\").replace('"', '\\"')
+            toml_text = toml_text.replace(
+                'zotero_storage = ""', f'zotero_storage = "{escaped}"'
+            )
+            print(f"已检测到 Zotero 自定义数据目录: {zotero_storage}"
+                  "（已自动填入 [paths].zotero_storage）")
+        else:
+            print("未检测到 Zotero 自定义数据目录，"
+                  "[paths].zotero_storage 将使用默认值 ~/Zotero/storage")
+    out.write_text(toml_text, encoding="utf-8")
     print(f"已生成配置模板: {out}")
     print(f"提示: 全局使用请设置环境变量 KB_CONFIG={out}，之后可在任意目录运行 kb 命令")
     print("请编辑 [paths].kb_root 等路径，并通过环境变量提供 API 密钥。")
@@ -190,6 +211,11 @@ def cmd_status(args):
         if path:
             exists = "存在" if path.exists() else "不存在"
             print(f"  {label}: {path} ({exists})")
+    detected_storage, zotero_custom = detect_zotero_storage()
+    if zotero_custom and cfg.zotero_storage and cfg.zotero_storage != detected_storage:
+        print(f"  ⚠ 检测到 Zotero 自定义数据目录: {detected_storage}")
+        print(f"    当前配置指向 {cfg.zotero_storage}，`kb sync-zotero` 可能扫描不到文件；"
+              "请修改 [paths].zotero_storage 或重新运行 `kb init --force`")
     if root and root.exists():
         from kbimporter.scanner import scan_all_files
         files = scan_all_files(cfg)
@@ -425,6 +451,10 @@ def cmd_ocr_disable(args):
 
 
 def cmd_ocr_keys(args):
+    if os.name != "nt":
+        print("提示: macOS/Linux 的“用户”列检测 ~/.zshrc、~/.zshenv、~/.bash_profile、"
+              "~/.bashrc、~/.profile 等 shell 配置文件；")
+        print("      写入后需重新打开终端或 source 对应文件才在当前进程生效。")
     for provider in ("paddle", "mineru", "baidu", "openai"):
         envs = _key_envs(provider)
         for k in envs:
@@ -441,10 +471,41 @@ def cmd_ocr_keys(args):
     return 0
 
 
+_SHELL_RC_FILES = (
+    ".zshrc", ".zshenv", ".bash_profile", ".bashrc", ".profile",
+    ".config/fish/config.fish",
+)
+
+
+def _shell_rc_files() -> list[Path]:
+    home = Path.home()
+    return [home / name for name in _SHELL_RC_FILES]
+
+
+def _env_in_shell_files(name: str) -> bool:
+    """在常见 shell 配置文件中查找 `export KEY=...`（fish 的 `set -gx KEY ...`）。"""
+    export_re = re.compile(rf"^\s*(?:export\s+)?{re.escape(name)}\s*=")
+    fish_re = re.compile(rf"^\s*set\s+(?:-gx|-x|-Ux|-U)\s+{re.escape(name)}(?:\s|$)")
+    for rc in _shell_rc_files():
+        try:
+            lines = rc.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if export_re.match(line) or fish_re.match(line):
+                return True
+    return False
+
+
 def _env_scopes(name: str) -> dict[str, bool]:
-    """检查环境变量在进程 / Windows 用户 / Windows 系统三个作用域是否存在。"""
+    """检查环境变量在进程 / 用户 / 系统三个作用域是否存在。
+
+    Windows：用户/系统来自注册表；macOS/Linux：用户列检测常见 shell
+    配置文件（~/.zshrc、~/.bash_profile、~/.profile 等）。
+    """
     scopes = {"process": bool(os.environ.get(name)), "user": False, "machine": False}
     if os.name != "nt":
+        scopes["user"] = _env_in_shell_files(name)
         return scopes
     try:
         import winreg
@@ -466,6 +527,76 @@ def _env_scopes(name: str) -> dict[str, bool]:
     except Exception:
         pass
     return scopes
+
+
+def _shell_profile_path() -> Path:
+    """返回建议写入的 shell 启动文件路径（已存在者优先）。"""
+    home = Path.home()
+    if os.name == "nt":
+        for sub in ("PowerShell", "WindowsPowerShell"):
+            p = home / "Documents" / sub / "Microsoft.PowerShell_profile.ps1"
+            if p.exists():
+                return p
+        return home / "Documents" / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
+    for name in (".zshrc", ".bash_profile", ".profile", ".bashrc"):
+        p = home / name
+        if p.exists():
+            return p
+    return home / ".profile"
+
+
+def _shell_init_lines(cfg_path: Path) -> tuple[str, list[str]]:
+    """返回 (shell 名称, 需要写入启动文件的命令行列表)。"""
+    cfg_path = Path(cfg_path).resolve()
+    if os.name == "nt":
+        scripts = Path(sys.executable).parent
+        return "PowerShell", [
+            "# kbimporter shell-init（由 `kb shell-init --apply` 添加）",
+            f'$env:KB_CONFIG = "{cfg_path}"',
+            f'$env:PATH = "$env:PATH;{scripts}"',
+        ]
+    return "POSIX shell", [
+        "# kbimporter shell-init（由 `kb shell-init --apply` 添加）",
+        f'export KB_CONFIG="{cfg_path}"',
+        'export PATH="$HOME/.local/bin:$PATH"',
+    ]
+
+
+def cmd_shell_init(args):
+    cfg = _config(args)
+    cfg_path = cfg.config_path
+    if cfg_path is None:
+        print("未找到配置文件：请先运行 `kb init --root <知识库路径>` 生成 "
+              "kb_config.toml，再运行 `kb shell-init`。")
+        return 1
+    shell_name, lines = _shell_init_lines(cfg_path)
+    print("=" * 60)
+    print("kb shell-init：把 `kb` 变为全局命令，并固定全局配置")
+    print(f"配置文件: {cfg_path}")
+    print(f"检测到 shell: {shell_name}")
+    print("需要加入 shell 启动文件的内容：")
+    for line in lines:
+        print(f"  {line}")
+    if os.name != "nt":
+        kb_bin = Path(sys.executable).parent / "kb"
+        print("macOS/Linux 还需创建全局命令软链：")
+        print(f"  mkdir -p ~/.local/bin && ln -sf {kb_bin} ~/.local/bin/kb")
+    if not args.apply:
+        print("提示: 运行 `kb shell-init --apply` 可自动写入（幂等，不会重复添加）。")
+        return 0
+    profile = _shell_profile_path()
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    text = profile.read_text(encoding="utf-8", errors="replace") if profile.exists() else ""
+    if "kbimporter shell-init" in text:
+        print(f"已检测到 kbimporter 配置，跳过写入: {profile}")
+        return 0
+    with profile.open("a", encoding="utf-8") as f:
+        if text and not text.endswith("\n"):
+            f.write("\n")
+        f.write("\n".join(lines) + "\n")
+    print(f"已写入: {profile}")
+    print("重新打开终端后生效。")
+    return 0
 
 
 def cmd_scan(args):
@@ -562,6 +693,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="知识库导入程序：Zotero 同步 / 文档转 Markdown / 去重清理 / Milvus 向量化导入",
     )
     parser.add_argument("--version", action="version", version=f"kbimporter {__version__}")
+    parser.add_argument("--config", "-c", metavar="PATH",
+                        help="配置文件路径（也可放在子命令后，如 `kb doctor --config PATH`）")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("init", help="生成配置模板")
@@ -573,21 +706,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("status", help="查看知识库与增量状态（只读）")
-    p.add_argument("--config", "-c")
+    _add_config_arg(p)
     p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("import", help="增量向量化导入（Milvus）")
-    p.add_argument("--config", "-c")
+    _add_config_arg(p)
     p.add_argument("--dry-run", action="store_true", help="只读预演，不写状态库、不调用 Milvus")
     p.set_defaults(func=cmd_import)
 
     p = sub.add_parser("sync-zotero", help="同步 Zotero storage 到文献库")
-    p.add_argument("--config", "-c")
+    _add_config_arg(p)
     p.add_argument("--dry-run", action="store_true", help="只读预演")
     p.set_defaults(func=cmd_sync)
 
     p = sub.add_parser("convert", help="文档转 Markdown（Marker + MarkItDown）")
-    p.add_argument("--config", "-c")
+    _add_config_arg(p)
     p.add_argument("--dry-run", action="store_true", help="只读预演，不运行转换工具")
     p.add_argument("--scan-dir", help="覆盖扫描目录")
     p.add_argument("--engine", choices=["auto", "marker", "mineru", "cloud"],
@@ -598,10 +731,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("command", nargs="?", help="具体命令名，如 kb help import")
     p.set_defaults(func=cmd_help)
 
+    p = sub.add_parser("shell-init", help="一键生成全局命令与全局配置的 shell 启动项")
+    p.add_argument("--apply", action="store_true",
+                   help="自动写入 shell 启动文件（幂等，不会重复添加）")
+    _add_config_arg(p)
+    p.set_defaults(func=cmd_shell_init)
+
     p = sub.add_parser("ocr", help="管理 OCR 模式与云端 OCR")
     ocr_sub = p.add_subparsers(dest="ocr_command", required=True)
     ps = ocr_sub.add_parser("status", help="查看当前 OCR 模式与密钥状态")
-    ps.add_argument("--config", "-c")
+    _add_config_arg(ps)
     ps.set_defaults(func=cmd_ocr_status)
     pm = ocr_sub.add_parser("mode", help="切换模式：local（本地）/ hybrid（混合）/ cloud（云端）")
     pm.add_argument("mode", choices=["local", "hybrid", "cloud"])
@@ -613,7 +752,7 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("--fallback",
                     choices=["paddle", "mineru", "baidu", "openai", "none"],
                     help="云端 OCR 备选 provider（默认 mineru；none 表示不设备选）")
-    pm.add_argument("--config", "-c")
+    _add_config_arg(pm)
     pm.set_defaults(func=cmd_ocr_mode)
     pe = ocr_sub.add_parser("enable", help="启用云端 OCR（混合模式，本地失败自动云端）")
     pe.add_argument("--provider",
@@ -622,33 +761,33 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--fallback",
                     choices=["paddle", "mineru", "baidu", "openai", "none"],
                     help="云端 OCR 备选 provider（默认 mineru；none 表示不设备选）")
-    pe.add_argument("--config", "-c")
+    _add_config_arg(pe)
     pe.set_defaults(func=cmd_ocr_enable)
     pd = ocr_sub.add_parser("disable", help="关闭云端 OCR（本地模式）")
-    pd.add_argument("--config", "-c")
+    _add_config_arg(pd)
     pd.set_defaults(func=cmd_ocr_disable)
     pk = ocr_sub.add_parser("keys", help="查看各云端 OCR 密钥是否已设置")
-    pk.add_argument("--config", "-c")
+    _add_config_arg(pk)
     pk.set_defaults(func=cmd_ocr_keys)
 
     p = sub.add_parser("doctor", help="扫描本机依赖/引擎/密钥/Milvus（默认只读）")
-    p.add_argument("--config", "-c")
+    _add_config_arg(p)
     p.add_argument("--deep", action="store_true",
                    help="端到端嵌入体检：临时创建并删除 _probe_kbimporter 集合（写操作）")
     p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("scan", help="扫描状态文件与 Milvus 库（只读）")
-    p.add_argument("--config", "-c")
+    _add_config_arg(p)
     p.add_argument("--state-only", action="store_true", help="只扫描状态文件")
     p.add_argument("--milvus-only", action="store_true", help="只扫描 Milvus 库")
     p.set_defaults(func=cmd_scan)
 
     p = sub.add_parser("setup", help="引导创建虚拟环境并安装依赖")
-    p.add_argument("--config", "-c")
+    _add_config_arg(p)
     p.set_defaults(func=cmd_setup)
 
     p = sub.add_parser("dedupe", help="同名/重复文件清理与 MD 替换")
-    p.add_argument("--config", "-c")
+    _add_config_arg(p)
     p.add_argument("--execute", action="store_true", help="实际执行（默认仅预演）")
     p.add_argument("--scope", choices=["project", "library", "all"], default="all")
     p.add_argument("--replace-existing", action="store_true",
@@ -656,7 +795,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_dedupe)
 
     p = sub.add_parser("search", help="检索 Milvus（只读）")
-    p.add_argument("--config", "-c")
+    _add_config_arg(p)
     p.add_argument("--collection", required=True, help="集合名，如 academic_library / proj_xxx / fieldwork_kb")
     p.add_argument("--kind", choices=["dense", "bm25", "query"], default="dense")
     p.add_argument("query", nargs="?", help="查询文本（query 模式可省略）")

@@ -143,7 +143,10 @@ def test_paddle_provider_retries_failed_job(cfg, monkeypatch):
 
 
 def test_split_pdf_splits_by_pages(tmp_path: Path):
-    import fitz
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz
     src = tmp_path / "book.pdf"
     doc = fitz.open()
     for i in range(5):
@@ -446,17 +449,63 @@ def test_provider_state_isolation_clears_old_parts(cfg, monkeypatch):
 
 
 def test_looks_like_quota_error():
-    assert cloud_ocr._looks_like_quota_error(429) is True
-    assert cloud_ocr._looks_like_quota_error(None, "daily quota reached") is False
-    assert cloud_ocr._looks_like_quota_error(None, "额度已用完") is False
-    assert cloud_ocr._looks_like_quota_error(None, "60018") is False
+    # 裸 429 / code=12002 是限流，不是额度耗尽
+    assert cloud_ocr._looks_like_quota_error(429) is False
+    assert cloud_ocr._looks_like_quota_error(
+        429, '{"code":12002,"msg":"请求频率过高，请稍后重试"}'
+    ) is False
+    # 只有明确的额度错误码/关键词才算额度耗尽
     assert cloud_ocr._looks_like_quota_error(
         None, "60018", quota_codes=("60018",)
     ) is True
-    assert cloud_ocr._looks_like_quota_error(None, "今日解析量已达上限") is False
+    assert cloud_ocr._looks_like_quota_error(
+        429, '{"code":12001,"msg":"每日解析额度已用完"}',
+        quota_keywords=cloud_ocr._QUOTA_TEXT_KEYWORDS,
+    ) is True
+    assert cloud_ocr._looks_like_quota_error(
+        None, "quota exceeded", quota_keywords=cloud_ocr._QUOTA_TEXT_KEYWORDS
+    ) is True
+    # 官方文档：429 = 超出单日解析最大页数（额度耗尽）
+    assert cloud_ocr._looks_like_quota_error(
+        429, "超出单日解析最大页数",
+        quota_keywords=cloud_ocr._QUOTA_TEXT_KEYWORDS,
+    ) is True
+    assert cloud_ocr._looks_like_quota_error(
+        None, "今日解析量已达上限",
+        quota_keywords=cloud_ocr._QUOTA_TEXT_KEYWORDS,
+    ) is True
+    # 普通错误不是额度问题
     assert cloud_ocr._looks_like_quota_error(None, "file size exceeds limit") is False
     assert cloud_ocr._looks_like_quota_error(None, "超出文件大小上限") is False
     assert cloud_ocr._looks_like_quota_error(503, "server busy") is False
+
+
+def test_is_rate_limit():
+    assert cloud_ocr._is_rate_limit(429) is True
+    assert cloud_ocr._is_rate_limit(
+        429, '{"code":12002,"msg":"请求频率过高，请稍后重试"}'
+    ) is True
+    assert cloud_ocr._is_rate_limit(
+        None, "请求频率过高",
+        rate_limit_keywords=cloud_ocr._RATE_LIMIT_TEXT_KEYWORDS,
+    ) is True
+    assert cloud_ocr._is_rate_limit(500, "server busy") is False
+    assert cloud_ocr._is_rate_limit(
+        200, '{"code":0,"msg":"ok"}',
+        rate_limit_keywords=cloud_ocr._RATE_LIMIT_TEXT_KEYWORDS,
+    ) is False
+
+
+def test_retry_after_seconds():
+    class Resp:
+        def __init__(self, headers=None):
+            self.headers = headers
+
+    assert cloud_ocr._retry_after_seconds(Resp({"Retry-After": "5"})) == 5.0
+    assert cloud_ocr._retry_after_seconds(Resp({"retry-after": "2.5"})) == 2.5
+    assert cloud_ocr._retry_after_seconds(Resp({})) is None
+    assert cloud_ocr._retry_after_seconds(Resp({"Retry-After": "abc"})) is None
+    assert cloud_ocr._retry_after_seconds(object()) is None
 
 
 def test_quota_skip_paddle_for_rest_of_run(cfg, monkeypatch):
@@ -582,7 +631,7 @@ def test_paddle_submit_quota_error_fails_fast(cfg, monkeypatch, tmp_path: Path):
 
     class Resp:
         status_code = 429
-        text = "daily limit reached"
+        text = '{"code":12001,"msg":"每日解析额度已用完"}'
 
         def json(self):
             raise AssertionError("不应解析 JSON")
@@ -604,7 +653,7 @@ def test_paddle_poll_quota_error_fails_fast(cfg, monkeypatch):
 
     class Resp:
         status_code = 429
-        text = "quota"
+        text = '{"code":12001,"msg":"每日解析额度已用完"}'
 
         def raise_for_status(self):
             pass
@@ -615,6 +664,67 @@ def test_paddle_poll_quota_error_fails_fast(cfg, monkeypatch):
     monkeypatch.setattr(requests, "get", lambda *a, **k: Resp())
     with pytest.raises(cloud_ocr.CloudQuotaError, match="额度"):
         cloud_ocr._paddle_poll(cfg, "job1", logging.getLogger("t"))
+
+
+def test_paddle_submit_rate_limit_retries_then_succeeds(cfg, monkeypatch, tmp_path: Path):
+    _enable_cloud(cfg, provider="paddle")
+    monkeypatch.setenv("PADDLE_OCR_API_KEY", "token")
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"pdf")
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    class Resp429:
+        status_code = 429
+        text = '{"code":12002,"msg":"请求频率过高，请稍后重试"}'
+        headers = {}
+
+    class RespOk:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"data": {"jobId": "job-ok"}}
+
+    def fake_post(*a, **k):
+        calls["n"] += 1
+        return Resp429() if calls["n"] == 1 else RespOk()
+
+    monkeypatch.setattr(cloud_ocr.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(requests, "post", fake_post)
+    job_id = cloud_ocr._paddle_submit(cfg, pdf, logging.getLogger("t"))
+    assert job_id == "job-ok"
+    assert calls["n"] == 2  # 限流后退避重试成功，而不是熔断
+    assert sleeps
+
+
+def test_paddle_poll_rate_limit_continues_polling(cfg, monkeypatch):
+    _enable_cloud(cfg, provider="paddle")
+    monkeypatch.setenv("PADDLE_OCR_API_KEY", "token")
+    cfg.cloud_ocr.paddle.max_poll_seconds = 10
+    calls = {"n": 0}
+
+    class Resp429:
+        status_code = 429
+        text = '{"code":12002,"msg":"请求频率过高，请稍后重试"}'
+        headers = {}
+
+    class RespDone:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"data": {"state": "done"}}
+
+    def fake_get(*a, **k):
+        calls["n"] += 1
+        return Resp429() if calls["n"] == 1 else RespDone()
+
+    monkeypatch.setattr(cloud_ocr.time, "sleep", lambda s: None)
+    monkeypatch.setattr(requests, "get", fake_get)
+    data = cloud_ocr._paddle_poll(cfg, "job1", logging.getLogger("t"))
+    assert data["state"] == "done"
+    assert calls["n"] == 2  # 轮询遇到限流时等待后继续，而不是报额度耗尽
 
 
 def test_paddle_ocr_job_quota_no_resubmit(cfg, monkeypatch):

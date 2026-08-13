@@ -29,6 +29,34 @@ def test_cli_init_refuses_overwrite(tmp_path: Path, monkeypatch, capsys):
     assert "已存在" in capsys.readouterr().out
 
 
+def test_cli_init_fills_custom_zotero_storage(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from kbimporter import cli
+    monkeypatch.setattr(
+        cli, "detect_zotero_storage", lambda: (Path(r"D:\Zotero\storage"), True)
+    )
+    rc = main(["init", "--root", str(tmp_path / "kb"), "--output", "kb_config.toml",
+               "--non-interactive"])
+    assert rc == 0
+    content = (tmp_path / "kb_config.toml").read_text(encoding="utf-8")
+    assert 'zotero_storage = "D:\\\\Zotero\\\\storage"' in content
+    from kbimporter.config import load_config
+    cfg = load_config(tmp_path / "kb_config.toml")
+    assert cfg.zotero_storage == Path(r"D:\Zotero\storage")
+
+
+def test_cli_global_config_before_subcommand(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    rc = main(["init", "--root", str(tmp_path / "kb"), "--output", "kb_config.toml",
+               "--non-interactive"])
+    assert rc == 0
+    rc = main(["--config", "kb_config.toml", "status"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "知识库根目录" in out
+    assert str(tmp_path / "kb") in out
+
+
 def test_cli_help_command(capsys):
     rc = main(["help"])
     assert rc == 0
@@ -76,6 +104,40 @@ def test_cli_ocr_keys(capsys):
     out = capsys.readouterr().out
     assert "paddle" in out and "PADDLE_OCR_API_KEY" in out
     assert "mineru" in out and "MINERU_API_KEY" in out
+
+
+def test_env_in_shell_files(tmp_path: Path, monkeypatch):
+    from kbimporter import cli
+    rc = tmp_path / ".zshrc"
+    rc.write_text(
+        'export PADDLE_OCR_API_KEY="abc"\n'
+        "set -gx MINERU_API_KEY token\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "_shell_rc_files", lambda: [rc])
+    assert cli._env_in_shell_files("PADDLE_OCR_API_KEY") is True
+    assert cli._env_in_shell_files("MINERU_API_KEY") is True
+    assert cli._env_in_shell_files("DASHSCOPE_API_KEY") is False
+
+
+def test_cli_shell_init_apply_writes_profile(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    rc = main(["init", "--root", str(tmp_path / "kb"), "--output", "kb_config.toml",
+               "--non-interactive"])
+    assert rc == 0
+    from kbimporter import cli
+    monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: tmp_path))
+    rc = main(["shell-init", "--config", "kb_config.toml", "--apply"])
+    assert rc == 0
+    profile = cli._shell_profile_path()
+    assert profile.exists()
+    text = profile.read_text(encoding="utf-8")
+    assert "kbimporter shell-init" in text
+    assert "KB_CONFIG" in text
+    # 幂等：再次执行不追加
+    rc = main(["shell-init", "--config", "kb_config.toml", "--apply"])
+    assert rc == 0
+    assert profile.read_text(encoding="utf-8") == text
 
 
 def test_cli_ocr_enable_mineru_fallback(tmp_path, monkeypatch):

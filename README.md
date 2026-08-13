@@ -199,6 +199,11 @@ docker run -d --name milvus --security-opt seccomp:unconfined `
 
 需要 Python 3.11+。
 
+> **Python 3.13/3.14 注意**：核心功能（导入/同步/去重）零依赖，3.13+ 没问题；但
+> `[ocr]` 会拉入 PyTorch/opencv/onnxruntime 等重型依赖，在 3.13+ 上可能没有预编译
+> wheel。`kb doctor` / `kb setup` 检测到 3.13+ 时会提示：本地 OCR 建议用
+> Python 3.11/3.12，或改用云端 OCR。
+
 从发行包安装（按需选择 extras，避免一次性拉入 Marker/PyTorch 等重型依赖）：
 
 ```bash
@@ -260,12 +265,18 @@ python -m venv .venv
 
 `kb` 安装后会把可执行文件放进虚拟环境的 `Scripts`（Windows）或 `bin`（macOS/Linux）：
 
+- `kb shell-init`：一键生成“全局命令 + 全局配置”的 shell 启动项。它会打印需要加入
+  `~/.zshrc` / `~/.bash_profile`（或 PowerShell `$PROFILE`）的内容；加 `--apply` 可
+  自动写入（幂等，不会重复添加）。macOS/Linux 还需执行一次 `ln -sf
+  <venv>/bin/kb ~/.local/bin/kb`（启动项里已包含 `PATH` 行）。
 - Windows：把 `.venv\Scripts` 加入 PATH；或直接把
   `.venv\Scripts\kb.exe` 复制到 `%APPDATA%\Microsoft\Windows\Start Menu\Programs` 之外的
   任意 PATH 目录。
 - 配置查找顺序：`--config` > 环境变量 `KB_CONFIG` > 当前目录 `kb_config.toml` >
   项目根 > `%APPDATA%\kbimporter\kb_config.toml`（macOS/Linux 为
   `~/.config/kbimporter/kb_config.toml`）。
+- `--config` 是全局参数，放在子命令前后都行：`kb --config <路径> doctor` 与
+  `kb doctor --config <路径>` 等价。
 - 全局使用建议：`kb init --root D:\知识库 --output "$env:APPDATA\kbimporter\kb_config.toml"`
   后设置 `KB_CONFIG` 指向该文件，任何目录直接 `kb status` 都能读到。
 
@@ -303,6 +314,15 @@ kb setup                     # 或让程序引导创建虚拟环境、按需安�
 `kb init` 会交互询问是否有高性能显卡并推荐 OCR 方案；`kb setup` 会先扫描本机环境，再
 询问显卡与 OCR 方案，并按方案按需安装依赖，不再默认安装全部重型包。
 
+`kb init` 会自动读取 Zotero 的 `prefs.js`（macOS/Linux/Windows 常见 Profiles 目录），
+若检测到 `extensions.zotero.dataDir` 指向自定义目录，会自动把
+`[paths].zotero_storage` 填成 `<dataDir>/storage`，避免默认 `~/Zotero/storage`
+同步出来是空目录。`kb doctor` / `kb status` 也会在配置与检测结果不一致时给出明确警告。
+
+`kb doctor` 现在区分“Milvus 可达”和“向量化可用”：TCP 可达只代表服务在监听，不代表
+服务端已配置 `MILVUSAI_DASHSCOPE_API_KEY`；默认报告会标注“向量化链路未验证，请运行
+`kb doctor --deep`”，并提示服务端密钥检查点，不再把“可达”误当成“能导入”。
+
 ## 使用
 
 ### 一次完整流程
@@ -334,6 +354,10 @@ kb search --collection academic_library --kind dense "你的问题"
    ```
    程序会扫描 Zotero storage，按基础文件名分组，自动选择“中文比例最低”的版本（原文）
    复制到 `zotero文献库/library/`；旧版本和过期记录会移入回收目录。
+   无可提取文字层的 PDF 会标记为“无文字层（疑似扫描件，后续需要 OCR）”，不会算成
+   “中文比例 0%”的英文原文；同一文献同时存在文字版和扫描版时，会优先选文字版。
+   同步结束时还会输出一份扫描件清单，方便直接在 `kb convert --dry-run` 前确认需要
+   OCR 的文件。
 4. 转换 PDF/EPUB 为 Markdown：
    ```bash
    kb convert --dry-run
@@ -518,12 +542,13 @@ kb ocr keys                                    # 查看各 provider 密钥是否
 下一个，云端识别更稳。`baidu` 与 `openai` 是按页/按批请求，同样带断点续传，适合大文件
 分批 OCR。
 
-**429 熔断（当日额度用完自动切换通道）**：PaddleOCR 每个模型每日解析上限为 3000 页，
-用完后 API 会返回 `429`。程序识别到 429 后**不再重试当前 provider**，立即切换到
-`fallback_providers` 里的下一个通道（如 MinerU），避免在无效重试上浪费时间；MinerU 的
-日额度错误（`-60018`）同样处理。一旦某个 provider 触发 429，**本次运行剩余文件都直接
-跳过该 provider**，不再重复尝试。除此之外的所有错误（500/503/504、解析失败、任务失败等）
-一律先按退避重试，重试耗尽后才允许回退到下一个通道。
+**429 限流与额度耗尽分开处理**：PaddleOCR 的 `429` 有两种含义，程序按响应体区分——
+`code:12002` / “请求频率过高，请稍后重试”是**请求限流**，按 `Retry-After` 或指数退避
+自动重试，不会误判成额度用完；响应体出现“超出单日解析最大页数 / 额度已用完 / 配额不足 /
+余额不足”等明确字样才是**当日额度耗尽**（官方文档：每模型每日 3000 页），此时才熔断并
+切换到 `fallback_providers` 里的下一个通道，且本次运行剩余文件直接跳过该 provider。
+MinerU 的日额度错误（`-60018`）同样按额度处理。除 429 限流外的普通错误
+（500/503/504、解析失败、任务失败等）一律先按退避重试，重试耗尽后才允许回退。
 
 **并发与超时**：超过单任务页数上限（PaddleOCR 100 页 / MinerU 200 页）的 PDF 会拆成
 多个子任务，按 `[cloud_ocr.paddle].max_workers` / `[cloud_ocr.mineru].max_workers`
@@ -596,6 +621,11 @@ setx DASHSCOPE_API_KEY "sk-..."                # OpenAI 兼容云端 OCR
 ```
 
 设置后**重新打开终端**，再运行 `kb doctor` 或 `kb ocr keys` 验证。
+
+`kb ocr keys` 在 Windows 上检查注册表用户/系统作用域；在 macOS/Linux 上会直接读取
+`~/.zshrc`、`~/.zshenv`、`~/.bash_profile`、`~/.bashrc`、`~/.profile`（以及 fish 的
+`~/.config/fish/config.fish`）里的 `export KEY=...` / `set -gx KEY ...`，避免“已经写进
+配置文件却永远显示未设置”的误导。
 
 注意区分两个密钥的用途：Milvus 服务端的 `MILVUSAI_DASHSCOPE_API_KEY`（或
 `deploy/user.yaml` 的 credential）负责向量化嵌入；本机环境变量中的 `DASHSCOPE_API_KEY`

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 
 from kbimporter import doctor
-from kbimporter.doctor import scan_environment
+from kbimporter.doctor import python_ocr_warning, scan_environment
 from kbimporter.setup import (
     CLOUD_OCR_EXTRAS,
     CORE_EXTRAS,
@@ -33,6 +34,45 @@ def test_doctor_scan_returns_structure(cfg, monkeypatch):
     assert info["state_db"]["path"] == str(cfg.state_db)
     assert "interpreters" in info
     assert isinstance(info["pip"], str)
+
+
+def test_python_ocr_warning_versions():
+    assert python_ocr_warning((3, 12, 0)) is None
+    assert python_ocr_warning((3, 13, 0)) is not None
+    assert python_ocr_warning((3, 14, 0)) is not None
+
+
+def test_scan_environment_zotero_mismatch(cfg, monkeypatch):
+    detected = Path("D:/Zotero/storage")
+    monkeypatch.setattr(
+        doctor, "detect_zotero_storage", lambda: (detected, True)
+    )
+    monkeypatch.setattr(doctor, "_candidate_interpreters", lambda: [])
+    monkeypatch.setattr(
+        "socket.create_connection",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("unreachable")),
+    )
+    info = scan_environment(cfg)
+    assert info["zotero_mismatch"] is True
+    assert info["zotero_detected"] == str(detected)
+
+
+def test_print_report_annotates_unverified_embedding(cfg, monkeypatch, capsys):
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr("socket.create_connection", lambda *a, **k: _Conn())
+    monkeypatch.setattr(doctor, "_candidate_interpreters", lambda: [])
+    info = scan_environment(cfg)
+    assert info["milvus_reachable"] is True
+    doctor.print_report(info, setup_logging())
+    out = capsys.readouterr().out
+    assert "向量化链路未验证" in out
+    assert "可达 ≠ 可向量化" in out
 
 
 def test_setup_non_interactive_prints_guidance(cfg, capsys):

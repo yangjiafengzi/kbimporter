@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import sys
 import types
@@ -122,6 +123,10 @@ class _FakePymilvus(types.ModuleType):
 if "pymilvus" not in sys.modules:
     sys.modules["pymilvus"] = _FakePymilvus("pymilvus")
 
+# 测试环境使用替身 MilvusClient，跳过真实 TCP 预检
+from kbimporter import models as _models
+_models._tcp_reachable = lambda cfg, timeout=2.0: True
+
 
 @pytest.fixture
 def cfg(tmp_path: Path) -> Config:
@@ -147,3 +152,16 @@ def _clear_cloud_quota_flags():
     from kbimporter.progress import tracker
     tracker.reset()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _fresh_kb_logger():
+    """每个测试重建 kbimporter logger，避免 StreamHandler 绑定到上个测试的 stdout。"""
+    logger = logging.getLogger("kbimporter")
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+    yield
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()

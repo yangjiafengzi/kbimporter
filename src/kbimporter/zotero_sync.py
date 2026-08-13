@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -51,20 +52,97 @@ def get_base_name(filename: str) -> str:
     return name
 
 
+def _pdf_module():
+    """返回 PyMuPDF 模块（优先 pymupdf 名称，兼容旧版 fitz），并关闭 MuPDF 报错刷屏。"""
+    try:
+        import pymupdf as pdfmod
+    except ImportError:
+        import fitz as pdfmod
+    try:
+        pdfmod.TOOLS.mupdf_display_errors(False)
+    except Exception:
+        pass
+    return pdfmod
+
+
+def _zotero_profiles_dirs() -> list[Path]:
+    """返回常见 Zotero Profiles 目录（macOS / Linux / Windows 新旧版本）。"""
+    dirs: list[Path] = []
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            dirs.append(Path(appdata) / "Zotero" / "Zotero" / "Profiles")
+            dirs.append(Path(appdata) / "Zotero" / "Profiles")
+    elif sys.platform == "darwin":
+        dirs.append(
+            Path.home() / "Library" / "Application Support" / "Zotero" / "Profiles"
+        )
+    else:
+        dirs.append(Path.home() / ".zotero" / "zotero" / "Profiles")
+        dirs.append(Path.home() / ".zotero" / "Profiles")
+    return dirs
+
+
+def read_zotero_data_dir() -> Path | None:
+    """从 Zotero prefs.js 读取自定义数据目录（extensions.zotero.dataDir）。"""
+    for profiles in _zotero_profiles_dirs():
+        try:
+            if not profiles.is_dir():
+                continue
+            prefs_list = sorted(profiles.glob("*/prefs.js"))
+        except OSError:
+            continue
+        for prefs in prefs_list:
+            try:
+                text = prefs.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            m = re.search(
+                r'user_pref\(\s*"extensions\.zotero\.dataDir"\s*,\s*'
+                r'("(?:[^"\\]|\\.)*")\s*\)',
+                text,
+            )
+            if not m:
+                continue
+            try:
+                value = json.loads(m.group(1))
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(value, str) and value.strip():
+                return Path(value)
+    return None
+
+
+def detect_zotero_storage() -> tuple[Path | None, bool]:
+    """返回 (Zotero 附件目录, 是否为自定义路径)。
+
+    Zotero 附件位于数据目录下的 storage/ 子目录；prefs.js 中
+    extensions.zotero.dataDir 与默认值不一致时视为自定义目录。
+    """
+    default = Path.home() / "Zotero" / "storage"
+    data_dir = read_zotero_data_dir()
+    if data_dir:
+        detected = data_dir / "storage"
+        return detected, detected != default
+    return default, False
+
+
 def extract_text_head(filepath: str | Path, char_limit: int = 500) -> str:
-    """提取 PDF/EPUB 开头文本，用于判断语言版本。"""
+    """提取 PDF/EPUB 开头文本，用于判断语言版本与是否有文字层。"""
     fp = str(filepath)
     try:
         if fp.lower().endswith(".pdf"):
-            import fitz
-            doc = fitz.open(fp)
-            text = ""
-            for page_num in range(min(5, len(doc))):
-                text += doc[page_num].get_text()
-                if len(text) >= char_limit:
-                    break
-            doc.close()
-            return text[:char_limit]
+            pdfmod = _pdf_module()
+            doc = pdfmod.open(fp)
+            try:
+                text = ""
+                for page_num in range(min(5, len(doc))):
+                    text += doc[page_num].get_text()
+                    if len(text) >= char_limit:
+                        break
+                return text[:char_limit]
+            finally:
+                doc.close()
         elif fp.lower().endswith(".epub"):
             import ebooklib
             from ebooklib import epub
@@ -81,6 +159,22 @@ def extract_text_head(filepath: str | Path, char_limit: int = 500) -> str:
     except Exception:
         return ""
     return ""
+
+
+def pdf_has_text_layer(filepath: str | Path, sample_pages: int = 5) -> bool:
+    """判断 PDF 是否包含可提取文字层（用于区分扫描件与纯外文）。"""
+    try:
+        pdfmod = _pdf_module()
+        doc = pdfmod.open(str(filepath))
+        try:
+            for page_num in range(min(sample_pages, len(doc))):
+                if doc[page_num].get_text().strip():
+                    return True
+            return False
+        finally:
+            doc.close()
+    except Exception:
+        return False
 
 
 def calc_chinese_ratio(text: str) -> float:
@@ -127,9 +221,16 @@ def sync_zotero(cfg: Config, dry_run: bool = False,
             continue
         if h in history:
             ratio = history[h]["chinese_ratio"]
+            has_text = history[h].get("has_text", True)
         else:
-            ratio = calc_chinese_ratio(extract_text_head(src))
-        current_records[h] = {"path": src, "chinese_ratio": ratio}
+            head_text = extract_text_head(src)
+            ratio = calc_chinese_ratio(head_text)
+            has_text = bool(head_text.strip())
+        current_records[h] = {
+            "path": src,
+            "chinese_ratio": ratio,
+            "has_text": has_text,
+        }
         if i % 50 == 0 or i == len(source_files):
             log.info(f"  已扫描 {i}/{len(source_files)}")
 
@@ -166,8 +267,15 @@ def sync_zotero(cfg: Config, dry_run: bool = False,
     copied, skipped, errors = 0, 0, 0
     for base, group in base_name_groups.items():
         log.info(f"  [处理文件组] {base} ({len(group)} 个候选)")
-        best_h, best_record = min(group, key=lambda x: x[1]["chinese_ratio"])
-        log.info(f"               最优选择: {os.path.basename(best_record['path'])} 中文比例={best_record['chinese_ratio']:.2%}")
+        # 优先选择有文字层的版本；纯扫描件不参与“中文比例最低=原文”的判定
+        text_candidates = [x for x in group if x[1].get("has_text", True)]
+        pool = text_candidates or group
+        best_h, best_record = min(pool, key=lambda x: x[1]["chinese_ratio"])
+        layer_note = "" if best_record.get("has_text", True) else "（无文字层，疑似扫描件）"
+        log.info(
+            f"               最优选择: {os.path.basename(best_record['path'])} "
+            f"中文比例={best_record['chinese_ratio']:.2%} {layer_note}"
+        )
 
         currently_copied_h = None
         for h in history:
@@ -202,6 +310,7 @@ def sync_zotero(cfg: Config, dry_run: bool = False,
             history[best_h] = {
                 "path": best_record["path"],
                 "chinese_ratio": best_record["chinese_ratio"],
+                "has_text": best_record.get("has_text", True),
                 "copied": True,
             }
             copied += 1
@@ -209,6 +318,7 @@ def sync_zotero(cfg: Config, dry_run: bool = False,
             history[best_h] = {
                 "path": best_record["path"],
                 "chinese_ratio": best_record["chinese_ratio"],
+                "has_text": best_record.get("has_text", True),
                 "copied": True,
             }
             skipped += 1
@@ -220,9 +330,24 @@ def sync_zotero(cfg: Config, dry_run: bool = False,
             history[h] = {
                 "path": record["path"],
                 "chinese_ratio": record["chinese_ratio"],
+                "has_text": record.get("has_text", True),
                 "copied": False,
             }
             new_records += 1
+
+    scan_files = sorted(
+        os.path.basename(record["path"])
+        for record in current_records.values()
+        if not record.get("has_text", True)
+    )
+    if scan_files:
+        log.info("-" * 50)
+        log.info(
+            f"以下 {len(scan_files)} 个文件无可提取文字层"
+            "（疑似扫描件，后续需要 OCR）："
+        )
+        for name in scan_files:
+            log.info(f"  - {name}")
 
     if not dry_run:
         save_hash_history(hash_file, history)
@@ -236,6 +361,7 @@ def sync_zotero(cfg: Config, dry_run: bool = False,
         "cleaned": cleaned,
         "errors": errors,
         "new_records": new_records,
+        "no_text_layer": len(scan_files),
     }
     log.info("=" * 50)
     log.info(f"同步完成: 新增/替换 {copied}, 跳过 {skipped}, 清理 {cleaned}, 错误 {errors}")

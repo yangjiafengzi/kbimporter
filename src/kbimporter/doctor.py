@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from kbimporter.config import Config
+from kbimporter.zotero_sync import detect_zotero_storage
 
 
 def _package_installed(name: str) -> bool:
@@ -48,6 +49,19 @@ def _pip_version() -> str:
     except Exception:
         pass
     return ""
+
+
+def python_ocr_warning(python_version: tuple[int, ...] | None = None) -> str | None:
+    """Python 3.13+ 时提示本地 OCR 重型依赖可能缺少预编译 wheel。"""
+    version = python_version or sys.version_info[:3]
+    if version >= (3, 13):
+        return (
+            f"当前 Python {'.'.join(map(str, version))}：本地 OCR（[ocr] 中的 "
+            "marker-pdf / PyTorch / opencv / onnxruntime）在 3.13+ 上可能缺少"
+            "预编译 wheel，建议使用 Python 3.11/3.12 安装本地 OCR，"
+            "或改用云端 OCR。"
+        )
+    return None
 
 
 def _env_exe(env: str, exe: str) -> str | None:
@@ -117,11 +131,12 @@ def scan_environment(cfg: Config) -> dict:
     result["python"] = sys.version.split()[0]
     result["python_exe"] = sys.executable
     result["pip"] = _pip_version()
+    result["python_ocr_warning"] = python_ocr_warning()
 
     result["packages"] = {
         "pypinyin": _package_installed("pypinyin"),
         "pymilvus": _package_installed("pymilvus"),
-        "pymupdf": _package_installed("fitz"),
+        "pymupdf": _package_installed("pymupdf") or _package_installed("fitz"),
         "ebooklib": _package_installed("ebooklib"),
         "beautifulsoup4": _package_installed("bs4"),
         "pdfplumber": _package_installed("pdfplumber"),
@@ -155,10 +170,20 @@ def scan_environment(cfg: Config) -> dict:
         "fieldwork": bool(cfg.fieldwork_root and cfg.fieldwork_root.exists()),
         "zotero_storage": bool(cfg.zotero_storage and cfg.zotero_storage.exists()),
     }
+    detected_storage, zotero_custom = detect_zotero_storage()
+    result["zotero_detected"] = str(detected_storage) if detected_storage else ""
+    result["zotero_custom"] = zotero_custom
+    result["zotero_configured"] = str(cfg.zotero_storage) if cfg.zotero_storage else ""
+    result["zotero_mismatch"] = bool(
+        zotero_custom
+        and cfg.zotero_storage
+        and Path(cfg.zotero_storage) != detected_storage
+    )
     result["state_db"] = {
         "path": str(cfg.state_db) if cfg.state_db else "",
         "exists": bool(cfg.state_db and cfg.state_db.exists()),
     }
+    result["milvus_embedding_verified"] = False
     result["cloud_ocr_enabled"] = cfg.cloud_ocr.enabled
     result["cloud_ocr_provider"] = cfg.cloud_ocr.provider
     result["cloud_ocr_fallback_providers"] = list(
@@ -185,6 +210,8 @@ def print_report(info: dict, log: logging.Logger):
     log.info(f"Python: {info['python']} ({info['python_exe']})")
     pip_ver = info["pip"]
     log.info(f"pip: {'✓ ' + pip_ver if pip_ver else '✗ 未找到'}")
+    if info.get("python_ocr_warning"):
+        log.warning(f"⚠ {info['python_ocr_warning']}")
     log.info("-" * 60)
     log.info("Python 依赖:")
     for name, ok in info["packages"].items():
@@ -195,11 +222,28 @@ def print_report(info: dict, log: logging.Logger):
     log.info("环境变量（仅云端 OCR / LLM OCR 需要；向量化由 Milvus 服务端完成）:")
     for name, ok in info["env_keys"].items():
         log.info(f"  {_ok(ok)} {name}")
-    log.info(f"Milvus: {_ok(info['milvus_reachable'])} "
-             f"{info['milvus_reachable'] and '可达' or '不可达（未启动/未安装）'}")
+    if info["milvus_reachable"]:
+        if info.get("milvus_embedding_verified"):
+            log.info("Milvus: ✓ 可达，向量化链路已验证（--deep）")
+        else:
+            log.info("Milvus: ✓ 可达（向量化链路未验证，请运行 `kb doctor --deep`）")
+            log.info("  注意: 可达 ≠ 可向量化；若服务端未配置 "
+                     "MILVUSAI_DASHSCOPE_API_KEY（或 deploy/user.yaml 的 "
+                     "credential），`kb import` 仍会失败。")
+    else:
+        log.info("Milvus: ✗ 不可达（未启动/未安装），请先启动 Milvus "
+                 "（如 scripts/start-milvus.ps1 或 docker compose）。")
     log.info("知识库目录:")
     for name, ok in info["dirs"].items():
         log.info(f"  {_ok(ok)} {name}")
+    if info.get("zotero_mismatch"):
+        log.warning(f"  ⚠ 检测到 Zotero 自定义数据目录: {info['zotero_detected']}")
+        log.warning(
+            f"    当前 [paths].zotero_storage = {info['zotero_configured']}，"
+            "二者不一致，`kb sync-zotero` 可能扫描不到文件。"
+        )
+        log.warning("    建议将配置改为检测到的路径，或重新运行 "
+                    "`kb init --force` 自动填入。")
     log.info(f"状态库: {info['state_db']['path']} "
              f"({'已存在' if info['state_db']['exists'] else '尚未创建'})")
     log.info(f"云端 OCR: {'已启用（注意费用）' if info['cloud_ocr_enabled'] else '未启用'}")
@@ -245,9 +289,9 @@ def run_doctor(cfg: Config, logger: logging.Logger | None = None,
                deep: bool = False) -> dict:
     log = logger or logging.getLogger("kbimporter")
     info = scan_environment(cfg)
-    print_report(info, log)
     if deep:
-        check_embedding_chain(cfg, log)
+        info["milvus_embedding_verified"] = check_embedding_chain(cfg, log)
+    print_report(info, log)
     return info
 
 

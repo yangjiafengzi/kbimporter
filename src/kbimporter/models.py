@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import socket
+
 from kbimporter.config import Config
 
 _client_cache: dict[tuple[str, str], object] = {}
@@ -20,12 +22,39 @@ def _client_uri(cfg: Config) -> str:
     return f"http://{cfg.milvus.host}:{cfg.milvus.port}"
 
 
+def tcp_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
+    """快速 TCP 可达性检查（pymilvus 3.x 的 MilvusClient 是启动即连接）。"""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _tcp_reachable(cfg: Config, timeout: float = 2.0) -> bool:
+    return tcp_reachable(cfg.milvus.host, int(cfg.milvus.port), timeout)
+
+
 def get_client(cfg: Config):
     """获取（并缓存）MilvusClient 实例；pymilvus 3.x 推荐 API。"""
     pm = _pm()
     key = (cfg.milvus.host, cfg.milvus.port)
     if key not in _client_cache:
-        _client_cache[key] = pm.MilvusClient(uri=_client_uri(cfg))
+        if not _tcp_reachable(cfg):
+            raise RuntimeError(
+                f"无法连接 Milvus（{cfg.milvus.host}:{cfg.milvus.port}）。"
+                "请先启动 Milvus 服务（如 Docker Desktop 中的 milvus 容器），"
+                "或检查 [milvus] host/port 配置；可运行 `kb doctor` 查看详情。"
+            )
+        try:
+            client = pm.MilvusClient(uri=_client_uri(cfg))
+        except Exception as e:
+            raise RuntimeError(
+                f"连接 Milvus 失败（{_client_uri(cfg)}）：{e}\n"
+                "请确认 Milvus 已启动且 host/port 配置正确；"
+                "可运行 `kb doctor` 查看详情。"
+            ) from e
+        _client_cache[key] = client
     return _client_cache[key]
 
 
