@@ -617,7 +617,9 @@ def cmd_setup(args):
 def cmd_dedupe(args):
     cfg = _config(args)
     log = setup_logging()
-    dry_run = not args.execute
+    dry_run = args.dry_run
+    if getattr(args, "execute", False):
+        log.warning("--execute 已不再需要：kb dedupe 默认直接执行；如需预演请改用 --dry-run")
     if args.replace_existing:
         cfg.replace_existing_md = "always"
     from kbimporter.dedupe import run_dedupe
@@ -788,7 +790,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("dedupe", help="同名/重复文件清理与 MD 替换")
     _add_config_arg(p)
-    p.add_argument("--execute", action="store_true", help="实际执行（默认仅预演）")
+    p.add_argument("--dry-run", action="store_true",
+                   help="只读预演，不移动/替换任何文件（默认直接执行）")
+    p.add_argument("--execute", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--scope", choices=["project", "library", "all"], default="all")
     p.add_argument("--replace-existing", action="store_true",
                    help="强制用 Zotero 库 MD 替换现有 MD（含未知来源）")

@@ -114,7 +114,8 @@ SQLite 状态库（默认 `<根>/.kb/state.db`）记录每个文件的路径、h
 ### 安全默认值
 
 - 所有删除/替换先移入 `<根>/.kb/trash` 回收目录，不直接删除；
-- 破坏性命令默认 `--dry-run`，预演只读、不写状态库、不调用 Milvus；
+- 破坏性命令默认 `--dry-run`（`kb dedupe` 例外：默认直接执行，可用 `--dry-run`
+  预演），预演只读、不写状态库、不调用 Milvus；
 - 云端 OCR 默认关闭，必须显式启用；
 - API 密钥只从环境变量读取，禁止写入配置或代码；
 - 项目文献中的同名 MD 替换默认 `ocr_only`：只用知识库内 `zotero文献库/library/` 中的
@@ -392,7 +393,7 @@ kb search --collection academic_library --kind dense "你的问题"
    ```
 5. 避免重复 OCR：如果这些文献在文献库中已经转换过同名 MD，转换时会自动跳过
    （`skip_existing_md` 默认开启）。之后运行 `kb dedupe --dry-run` 预演、再
-   `kb dedupe --execute`，可以把 `zotero文献库/library/` 中已有的同名 MD 复制/顶替到
+   `kb dedupe` 直接执行，可以把 `zotero文献库/library/` 中已有的同名 MD 复制/顶替到
    项目目录（默认只替换本程序记录的 OCR 产物，旧文件进回收目录）。
 
 ### 3. 建立田野调查数据库
@@ -495,7 +496,7 @@ kb search --collection academic_library --kind dense "你的问题"
 | `kb sync-zotero [--dry-run]` | 同步 Zotero 文献 |
 | `kb convert [--dry-run] [--engine marker\|mineru\|cloud]` | 文档转 Markdown |
 | `kb import [--dry-run]` | 增量向量化导入 |
-| `kb dedupe [--execute] [--scope project\|library\|all]` | 去重/替换（默认预演） |
+| `kb dedupe [--dry-run] [--scope project\|library\|all]` | 去重/替换（默认直接执行） |
 | `kb search --collection <集合> --kind dense\|bm25\|query <词> [--filter 表达式]` | 检索 |
 | `kb ocr status / mode local\|hybrid [local\|cloud]\|cloud / enable / disable / keys` | OCR 模式、优先级与密钥管理 |
 

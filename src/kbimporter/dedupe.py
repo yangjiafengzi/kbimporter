@@ -320,7 +320,7 @@ def process_pdf_md_pairs(root: Path, cfg: Config, dry_run: bool,
     return processed
 
 
-def run_dedupe(cfg: Config, dry_run: bool = True, scope: str = "all",
+def run_dedupe(cfg: Config, dry_run: bool = False, scope: str = "all",
                logger: logging.Logger | None = None) -> dict:
     """统一去重清理：项目文献 5 步 + Zotero 文献库同名清理。"""
     log = logger or logging.getLogger("kbimporter")

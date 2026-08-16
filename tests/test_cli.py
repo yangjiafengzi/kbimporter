@@ -193,3 +193,20 @@ def test_cli_ocr_mode_hybrid_priority(tmp_path, monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "hybrid（本地优先）" in out
+
+
+def test_cli_dedupe_executes_by_default(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("KB_ROOT", raising=False)
+    rc = main(["init", "--root", str(tmp_path / "kb"), "--output", "kb_config.toml",
+               "--non-interactive"])
+    assert rc == 0
+    proj = tmp_path / "kb" / "项目文献"
+    pdf = proj / "a.pdf"
+    pdf.parent.mkdir(parents=True, exist_ok=True)
+    pdf.write_bytes(b"x")
+    (proj / "a.md").write_text("md", encoding="utf-8")
+
+    rc = main(["dedupe", "--config", "kb_config.toml", "--scope", "project"])
+    assert rc == 0
+    assert not pdf.exists()

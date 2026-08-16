@@ -10,7 +10,8 @@
 - 项目文献先人工筛选，再优先从文献库复制同名 MD，避免重复 OCR。
 - “中文比例最低 = 原文”只用于“英文原文 + 中文译本”场景。
 - 增量导入：hash 对比，只处理新增/修改，删除只清对应 `source_file`。
-- 安全第一：任何删除/替换都先移入回收目录，破坏性命令默认 dry-run。
+- 安全第一：任何删除/替换都先移入回收目录，破坏性命令默认 dry-run
+  （`kb dedupe` 例外：默认直接执行，可用 `--dry-run` 预演）。
 
 ## 二、与旧系统对应关系
 
@@ -273,7 +274,8 @@ MinerU 云端需要设置环境变量 `MINERU_API_KEY`（由 `[cloud_ocr.mineru]
 
 ### `kb dedupe`
 
-默认只预演；`--execute` 才实际执行；`--scope project|library|all`；
+默认直接执行（删除/替换先进回收目录）；`--dry-run` 只预演；
+`--scope project|library|all`；
 `--replace-existing` 强制用文献库 MD 顶替现有 MD。替换前按
 `file_origin`（`zotero_md` / `ocr_md` / 未知）决定是否覆盖。
 
@@ -317,7 +319,8 @@ python -m build
 ## 八、对 Agent 的行为规则
 
 1. 不得修改、删除、迁移用户的旧状态库（`0向量化/import_state.db`）与 Milvus 集合。
-2. 任何真实导入/转换/清理前必须先 dry-run，并向用户说明费用与影响。
+2. 任何真实导入/转换前必须先 dry-run，并向用户说明费用与影响；`kb dedupe`
+   默认直接执行（删除/替换先进回收目录），如需预演先运行 `kb dedupe --dry-run`。
 3. 删除/替换必须先移入回收目录，不直接 `rm`。
 4. 云端 OCR 默认关闭；只有用户显式确认后才启用。
 5. 密钥只从环境变量读取，禁止写入代码或配置。

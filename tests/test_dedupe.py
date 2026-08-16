@@ -139,3 +139,14 @@ def test_run_dedupe_dry_run_does_not_move(cfg: Config):
     assert not list(cfg.trash_dir.rglob("*")) if cfg.trash_dir.exists() else True
     assert stats["pdf_md_cleanup"] == 1
 
+
+def test_run_dedupe_default_executes(cfg: Config):
+    proj = cfg.project_root / "p"
+    proj.mkdir(parents=True)
+    pdf = _pdf(proj / "a.pdf")
+    (proj / "a.md").write_text("md", encoding="utf-8")
+    stats = dedupe.run_dedupe(cfg, scope="project",
+                              logger=dedupe.logging.getLogger("t"))
+    assert not pdf.exists()
+    assert any(p.name == "a.pdf" for p in cfg.trash_dir.rglob("*.pdf"))
+    assert stats["pdf_md_cleanup"] == 1
