@@ -627,6 +627,25 @@ def cmd_dedupe(args):
     return 0
 
 
+def cmd_release(args):
+    cfg = _config(args)
+    log = setup_logging()
+    from kbimporter.models import get_client
+    client = get_client(cfg)
+    names = [args.collection] if args.collection else client.list_collections()
+    if not names:
+        print("当前没有可释放的集合")
+        return 0
+    for name in names:
+        try:
+            client.release_collection(collection_name=name)
+            print(f"已释放: {name}")
+        except Exception as e:
+            log.warning(f"释放 {name} 失败: {e}")
+            print(f"释放失败: {name}: {e}")
+    return 0
+
+
 def cmd_search(args):
     cfg = _config(args)
     log = setup_logging()
@@ -637,56 +656,60 @@ def cmd_search(args):
         print(f"集合不存在: {coll_name}")
         return 2
     client.load_collection(collection_name=coll_name)
-    output_fields = ["text", "source_file", "granularity", "parent_id", "chunk_index"]
-    extra = {
-        "academic_library": ["author", "year", "title", "language"],
-        "fieldwork_kb": ["project_name", "source_type", "location"],
-    }.get(coll_name, ["project_name", "author", "year", "title"])
-    output_fields += [f for f in extra if f not in output_fields]
-    if args.kind == "query":
-        if not args.filter:
-            print("query 模式需要 --filter")
-            return 2
-        results = client.query(
-            collection_name=coll_name,
-            filter=args.filter,
-            output_fields=output_fields,
-            limit=args.limit,
-        )
-        for r in results:
+    try:
+        output_fields = ["text", "source_file", "granularity", "parent_id", "chunk_index"]
+        extra = {
+            "academic_library": ["author", "year", "title", "language"],
+            "fieldwork_kb": ["project_name", "source_type", "location"],
+        }.get(coll_name, ["project_name", "author", "year", "title"])
+        output_fields += [f for f in extra if f not in output_fields]
+        if args.kind == "query":
+            if not args.filter:
+                print("query 模式需要 --filter")
+                return 2
+            results = client.query(
+                collection_name=coll_name,
+                filter=args.filter,
+                output_fields=output_fields,
+                limit=args.limit,
+            )
+            for r in results:
+                print("=" * 60)
+                for k in output_fields:
+                    if k in r:
+                        print(f"{k}: {r[k]}")
+            return 0
+        if args.kind == "bm25":
+            results = client.search(
+                collection_name=coll_name,
+                data=[args.query],
+                anns_field="sparse",
+                search_params={"metric_type": "BM25"},
+                limit=args.limit,
+                output_fields=output_fields,
+                filter=args.filter or "",
+            )
+        else:
+            results = client.search(
+                collection_name=coll_name,
+                data=[args.query],
+                anns_field="vector",
+                search_params={"metric_type": "IP"},
+                limit=args.limit,
+                output_fields=output_fields,
+                filter=args.filter or "",
+            )
+        for i, hit in enumerate(results[0], 1):
             print("=" * 60)
+            print(f"[{i}] 相似度: {hit.get('distance', 0.0):.4f}")
+            entity = hit.get("entity", {})
             for k in output_fields:
-                if k in r:
-                    print(f"{k}: {r[k]}")
+                if k in entity:
+                    print(f"{k}: {entity[k]}")
         return 0
-    if args.kind == "bm25":
-        results = client.search(
-            collection_name=coll_name,
-            data=[args.query],
-            anns_field="sparse",
-            search_params={"metric_type": "BM25"},
-            limit=args.limit,
-            output_fields=output_fields,
-            filter=args.filter or "",
-        )
-    else:
-        results = client.search(
-            collection_name=coll_name,
-            data=[args.query],
-            anns_field="vector",
-            search_params={"metric_type": "IP"},
-            limit=args.limit,
-            output_fields=output_fields,
-            filter=args.filter or "",
-        )
-    for i, hit in enumerate(results[0], 1):
-        print("=" * 60)
-        print(f"[{i}] 相似度: {hit.get('distance', 0.0):.4f}")
-        entity = hit.get("entity", {})
-        for k in output_fields:
-            if k in entity:
-                print(f"{k}: {entity[k]}")
-    return 0
+    finally:
+        if getattr(args, "release", False):
+            client.release_collection(collection_name=coll_name)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -798,6 +821,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="强制用 Zotero 库 MD 替换现有 MD（含未知来源）")
     p.set_defaults(func=cmd_dedupe)
 
+    p = sub.add_parser("release", help="释放 Milvus 集合（仅卸载内存，不删除数据）")
+    _add_config_arg(p)
+    p.add_argument("collection", nargs="?", default=None,
+                   help="集合名；不填则释放全部集合")
+    p.set_defaults(func=cmd_release)
+
     p = sub.add_parser("search", help="检索 Milvus（只读）")
     _add_config_arg(p)
     p.add_argument("--collection", required=True, help="集合名，如 academic_library / proj_xxx / fieldwork_kb")
@@ -805,6 +834,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("query", nargs="?", help="查询文本（query 模式可省略）")
     p.add_argument("--filter", help="filter_expr，如 year >= 2020")
     p.add_argument("--limit", type=int, default=5)
+    p.add_argument("--release", action="store_true",
+                   help="检索结束后释放该集合（默认保留加载以便连续检索）")
     p.set_defaults(func=cmd_search)
 
     return parser

@@ -18,6 +18,7 @@ class FakeColl:
         self.deleted: list[str] = []
         self.upserted: list[dict] = []
         self.flushed = False
+        self.released = False
 
     def load(self):
         pass
@@ -36,14 +37,19 @@ class FakeColl:
     def flush(self):
         self.flushed = True
 
+    def release(self):
+        self.released = True
+
 
 @pytest.fixture
 def fake_milvus(monkeypatch):
     colls: dict[str, FakeColl] = {}
+    monkeypatch.setattr(importer, "_collection_cache", {})
 
     def get_coll(name, cfg):
         if name not in colls:
             colls[name] = FakeColl(name)
+            importer._collection_cache[name] = colls[name]
         return colls[name]
 
     monkeypatch.setattr(importer, "_get_collection", get_coll)
@@ -73,6 +79,8 @@ def test_import_new_and_incremental_skip(cfg: Config, fake_milvus, monkeypatch):
     assert stats["skipped"] == 0
     assert fake_milvus["academic_library"].inserted
     assert fake_milvus["proj_cunganbuleixing"].inserted
+    assert fake_milvus["academic_library"].released is True
+    assert fake_milvus["proj_cunganbuleixing"].released is True
     assert cfg.state_db.exists()
 
     stats2 = importer.run_import(cfg, dry_run=False)
@@ -124,6 +132,24 @@ def test_import_empty_file_marked(cfg: Config, fake_milvus):
     stats = importer.run_import(cfg, dry_run=False)
     assert stats["empty"] == 1
     assert not fake_milvus.get("academic_library")
+
+
+def test_release_loaded_collections_clears_cache(monkeypatch):
+    class _Coll:
+        def __init__(self, name: str):
+            self.name = name
+            self.released = False
+
+        def release(self):
+            self.released = True
+
+    a, b = _Coll("a"), _Coll("b")
+    monkeypatch.setattr(importer, "_collection_cache", {"a": a, "b": b})
+    log = importer.logging.getLogger("t")
+    assert importer._release_loaded_collections(log) == 2
+    assert a.released is True
+    assert b.released is True
+    assert importer._collection_cache == {}
 
 
 def test_import_reuses_legacy_state_without_altering_schema(cfg: Config,

@@ -78,6 +78,9 @@ class MilvusCollection:
     def load(self):
         self._client.load_collection(collection_name=self.name)
 
+    def release(self):
+        self._client.release_collection(collection_name=self.name)
+
     def insert(self, rows: list[dict]) -> list[int]:
         result = self._client.insert(collection_name=self.name, data=rows)
         ids = result.get("ids", []) if isinstance(result, dict) else []

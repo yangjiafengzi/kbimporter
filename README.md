@@ -496,8 +496,9 @@ kb search --collection academic_library --kind dense "你的问题"
 | `kb sync-zotero [--dry-run]` | 同步 Zotero 文献 |
 | `kb convert [--dry-run] [--engine marker\|mineru\|cloud]` | 文档转 Markdown |
 | `kb import [--dry-run]` | 增量向量化导入 |
+| `kb release [集合名]` | 释放 Milvus 集合内存（不删数据；不填集合名则释放全部） |
 | `kb dedupe [--dry-run] [--scope project\|library\|all]` | 去重/替换（默认直接执行） |
-| `kb search --collection <集合> --kind dense\|bm25\|query <词> [--filter 表达式]` | 检索 |
+| `kb search --collection <集合> --kind dense\|bm25\|query <词> [--filter 表达式] [--release]` | 检索（默认保留加载；`--release` 检索后释放） |
 | `kb ocr status / mode local\|hybrid [local\|cloud]\|cloud / enable / disable / keys` | OCR 模式、优先级与密钥管理 |
 
 ## 如何选择本地 / 云端 OCR

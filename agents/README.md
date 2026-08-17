@@ -15,12 +15,14 @@
 
 - `milvus_list_collections` — 列出集合
 - `milvus_load_collection` — 加载集合到内存
+- `milvus_release_collection` — 释放集合内存（切换/结束检索时调用）
 - `milvus_get_collection_info` — 查看集合 Schema
 - `milvus_text_search` — 无过滤 BM25 关键词检索（不支持 `filter_expr`）
 - `milvus_text_similarity_search` — 语义检索（`anns_field="vector", metric_type="IP"`）或带过滤 BM25（`anns_field="sparse", metric_type="BM25"`）
 - `milvus_query` — 标量过滤查询（取父块、核实来源）
 
 > ⚠️ 检索前若集合未加载，先调用 `milvus_load_collection`；禁用 `milvus_vector_search` / `milvus_hybrid_search`（需要外部嵌入工具，本环境没有）。
+> ⚠️ 内存管理：一次只保留一个集合加载；切换集合前先调用 `milvus_release_collection` 释放当前集合，全部检索结束后释放所有已加载集合。
 
 ### Math MCP（仅田野调查数据分析师）
 

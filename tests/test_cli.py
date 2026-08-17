@@ -63,6 +63,7 @@ def test_cli_help_command(capsys):
     out = capsys.readouterr().out
     assert "usage: kb" in out
     assert "import" in out
+    assert "release" in out
 
 
 def test_cli_help_subcommand(capsys):
@@ -210,3 +211,33 @@ def test_cli_dedupe_executes_by_default(tmp_path: Path, monkeypatch):
     rc = main(["dedupe", "--config", "kb_config.toml", "--scope", "project"])
     assert rc == 0
     assert not pdf.exists()
+
+
+def test_cli_release_releases_collections(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("KB_ROOT", raising=False)
+    rc = main(["init", "--root", str(tmp_path / "kb"), "--output", "kb_config.toml",
+               "--non-interactive"])
+    assert rc == 0
+    from kbimporter import models
+
+    class _FakeClient:
+        def __init__(self):
+            self.released: list[str] = []
+
+        def list_collections(self, **kwargs):
+            return ["a", "b"]
+
+        def release_collection(self, collection_name, **kwargs):
+            self.released.append(collection_name)
+
+    fake = _FakeClient()
+    monkeypatch.setattr(models, "get_client", lambda cfg: fake)
+
+    rc = main(["release", "--config", "kb_config.toml"])
+    assert rc == 0
+    assert fake.released == ["a", "b"]
+
+    rc = main(["release", "academic_library", "--config", "kb_config.toml"])
+    assert rc == 0
+    assert fake.released == ["a", "b", "academic_library"]

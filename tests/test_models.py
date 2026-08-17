@@ -49,6 +49,7 @@ class _FakeClient:
         self.collections: dict[str, dict] = {}
         self.created: list[str] = []
         self.indexes: list[tuple[str, list[dict]]] = []
+        self.released: list[str] = []
 
     @staticmethod
     def create_schema(**kwargs):
@@ -99,6 +100,9 @@ class _FakeClient:
 
     def load_collection(self, collection_name, **kwargs):
         pass
+
+    def release_collection(self, collection_name, **kwargs):
+        self.released.append(collection_name)
 
     def get_collection_stats(self, collection_name, **kwargs):
         rows = self.collections.get(collection_name, {}).get("rows", [])
@@ -154,6 +158,9 @@ def test_milvus_collection_crud_wrapper(cfg, monkeypatch):
     coll.delete(expr="source_file == 'a.md'")
     assert coll.num_entities == 0
     coll.flush()
+    client = models.get_client(cfg)
+    coll.release()
+    assert client.released == ["academic_library"]
 
 
 def test_tcp_reachable(monkeypatch):

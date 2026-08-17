@@ -69,6 +69,20 @@ def _get_collection(coll_name: str, cfg: Config):
     return _collection_cache[coll_name]
 
 
+def _release_loaded_collections(log: logging.Logger) -> int:
+    """释放本次进程已加载的所有集合，避免常驻内存（不删除任何数据）。"""
+    released = 0
+    for name, coll in list(_collection_cache.items()):
+        try:
+            coll.release()
+            log.info(f"  ✓ {name} 已释放")
+            released += 1
+        except Exception as e:
+            log.warning(f"  ✗ 释放 {name} 失败: {e}")
+    _collection_cache.clear()
+    return released
+
+
 def _delete_old_vectors(coll_name: str, source_file: str, cfg: Config):
     client = ensure_connected(cfg)
     if not client.has_collection(collection_name=coll_name):
@@ -387,6 +401,8 @@ def run_import(cfg: Config, dry_run: bool = False,
                 coll.flush()
                 log.info(f"  ✓ {name} 已 flush")
     finally:
+        if not dry_run:
+            _release_loaded_collections(log)
         conn.close()
 
     log.info("=" * 50)

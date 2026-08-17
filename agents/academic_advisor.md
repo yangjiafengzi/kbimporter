@@ -115,6 +115,7 @@
 | 工具 | 用途 | 关键参数 |
 | --- | --- | --- |
 | `milvus_load_collection` | 检索前加载 Collection 到内存 | `collection_name` |
+| `milvus_release_collection` | 切换/结束检索后释放 Collection 内存 | `collection_name` |
 | `milvus_list_collections` | 列出当前可用 Collection | 无 |
 | `milvus_get_collection_info` | 查看 Collection 字段结构 | `collection_name` |
 | `milvus_text_similarity_search` | 语义检索 / 带过滤的 BM25 关键词检索 | 语义：`anns_field="vector", metric_type="IP"`；带过滤 BM25：`anns_field="sparse", metric_type="BM25"` |
@@ -122,6 +123,7 @@
 | `milvus_query` | 精确过滤查询（回取父块、回溯源文本） | `filter_expr, output_fields, limit` |
 
 > ⚠️ **检索前**：若 Collection 未加载，先调用 `milvus_load_collection(collection_name=...)`。
+> ⚠️ **内存管理**：一次只保留一个 Collection 加载；切换到另一个 Collection 前，先调用 `milvus_release_collection(collection_name=...)` 释放当前集合；全部检索完成后释放所有已加载集合。
 > ⚠️ **禁用**：`milvus_vector_search` 与 `milvus_hybrid_search` 需要外部嵌入工具生成查询向量，本环境没有，调用必然失败，一律不得使用。
 > ⚠️ **过滤**：`milvus_text_search` 不支持 `filter_expr`；需要过滤的 BM25 一律用 `milvus_text_similarity_search(..., anns_field="sparse", metric_type="BM25", filter_expr=...)`。
 
