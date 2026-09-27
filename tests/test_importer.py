@@ -55,7 +55,8 @@ def fake_milvus(monkeypatch):
     monkeypatch.setattr(importer, "_get_collection", get_coll)
     monkeypatch.setattr(importer, "_delete_old_vectors", lambda *a, **k: None)
     monkeypatch.setattr(importer, "_cleanup_empty_project_collections", lambda *a, **k: 0)
-    for fn in ("ensure_academic_library", "ensure_project_collection", "ensure_fieldwork_kb"):
+    for fn in ("ensure_academic_library", "ensure_project_collection",
+               "ensure_fieldwork_kb", "ensure_connected", "ensure_partitions"):
         monkeypatch.setattr(importer, fn, lambda *a, **k: None)
     return colls
 
@@ -128,6 +129,8 @@ def test_process_academic_routes_partition(cfg, fake_milvus, monkeypatch):
 
     monkeypatch.setattr(importer, "_get_collection", lambda *a, **k: FakeColl())
     monkeypatch.setattr(importer, "ensure_academic_library", lambda *a, **k: None)
+    monkeypatch.setattr(importer, "ensure_connected", lambda *a, **k: None)
+    monkeypatch.setattr(importer, "ensure_partitions", lambda *a, **k: None)
     monkeypatch.setattr(importer, "chunk_document",
                         lambda text, cfg: (["粗块内容"], ["细块内容"], [0]))
 

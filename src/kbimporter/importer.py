@@ -12,6 +12,7 @@ from kbimporter.models import (
     ensure_academic_library,
     ensure_connected,
     ensure_fieldwork_kb,
+    ensure_partitions,
     ensure_project_collection,
 )
 from kbimporter.partition import academic_partition_name
@@ -156,6 +157,8 @@ def process_academic(fp: Path, text: str, info: dict, cfg: Config,
         return 0
     lang = detect_language(fp.name)
     part = academic_partition_name(lang, int(info.get("year") or 0))
+    client = ensure_connected(cfg)
+    ensure_partitions(client, "academic_library", [part])
     base = {
         "source_file": fp.relative_to(cfg.require_kb_root()).as_posix(),
         "extra_keys": {

@@ -68,6 +68,14 @@ def ensure_connected(cfg: Config):
     return get_client(cfg)
 
 
+def ensure_partitions(client, coll_name: str, partition_names: list[str]) -> None:
+    """Create missing named partitions (idempotent)."""
+    existing = set(client.list_partitions(collection_name=coll_name) or [])
+    for name in partition_names:
+        if name and name not in existing:
+            client.create_partition(collection_name=coll_name, partition_name=name)
+
+
 class MilvusCollection:
     """内部集合句柄：把 MilvusClient 调用封装成少量 ORM 风格方法。"""
 

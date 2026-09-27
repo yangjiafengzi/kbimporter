@@ -196,6 +196,22 @@ def test_collection_query_accepts_partition_names(cfg, monkeypatch):
     assert "partition_names" not in calls[1]
 
 
+def test_ensure_partitions_creates_missing_only():
+    from kbimporter.models import ensure_partitions
+
+    created = []
+
+    class FakeClient:
+        def list_partitions(self, collection_name):
+            return ["_default", "zh_2010s"]
+
+        def create_partition(self, collection_name, partition_name):
+            created.append(partition_name)
+
+    ensure_partitions(FakeClient(), "academic_library", ["zh_2010s", "en_2020s"])
+    assert created == ["en_2020s"]
+
+
 def test_tcp_reachable(monkeypatch):
     class _Conn:
         def __enter__(self):
