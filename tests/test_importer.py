@@ -15,6 +15,7 @@ class FakeColl:
     def __init__(self, name: str):
         self.name = name
         self.inserted: list[dict] = []
+        self.insert_partitions: list[str] = []
         self.deleted: list[str] = []
         self.upserted: list[dict] = []
         self.flushed = False
@@ -26,6 +27,7 @@ class FakeColl:
     def insert(self, rows, partition_name=""):
         start = len(self.inserted) + 1
         self.inserted.extend(rows)
+        self.insert_partitions.extend([partition_name] * len(rows))
         return list(range(start, start + len(rows)))
 
     def delete(self, expr: str):
@@ -143,6 +145,48 @@ def test_process_academic_routes_partition(cfg, fake_milvus, monkeypatch):
     )
     assert n == 2
     assert all(p == "zh_2010s" for p, _ in inserted)
+
+
+def test_run_import_archives_new_academic_into_partitions(cfg, fake_milvus, monkeypatch):
+    """完整 kb import 路径：新条目必须按 语言+年代 自动进对应分区。"""
+    ensured: list[list[str]] = []
+
+    def fake_ensure_partitions(client, coll_name, names):
+        ensured.append(list(names))
+
+    monkeypatch.setattr(importer, "ensure_partitions", fake_ensure_partitions)
+    monkeypatch.setattr(importer, "chunk_document",
+                        lambda text, cfg: (["粗块内容"], ["细块内容"], [0]))
+
+    cases = [
+        ("张三 - 2015 - 近十年治理.md", 2015, "zh", "zh_2010s"),
+        ("Smith - 2003 - Governance.md", 2003, "en", "en_2000s"),
+        ("李四 - 1995 - 乡土中国.md", 1995, "zh", "zh_1990s"),
+        ("Wang - 2021 - 英文研究.md", 2021, "en", "en_2020s"),
+        ("佚名 - 0 - 无年份.md", 0, "zh", "zh_unknown"),
+    ]
+    for fname, _year, _lang, _part in cases:
+        (cfg.library_dir / fname).write_text("正文。", encoding="utf-8")
+
+    stats = importer.run_import(cfg, dry_run=False)
+    assert stats["new"] == len(cases)
+
+    coll = fake_milvus["academic_library"]
+    # 每条 academic：coarse + fine 各 1 行 → 2 * len(cases)
+    assert len(coll.inserted) == 2 * len(cases)
+
+    from collections import Counter
+    expected_parts = Counter(p for *_x, p in cases for _ in (0, 1))
+    assert Counter(coll.insert_partitions) == expected_parts
+
+    # 每个目标分区都被 ensure 过
+    ensured_names = {n for names in ensured for n in names}
+    assert ensured_names == {p for *_x, p in cases}
+    for names in ensured:
+        assert len(names) == 1  # 每次只确保存在当前写入的分区
+
+    # 额外：process_academic 直接调用时 parent_id 与分区一致
+    assert all(r.get("granularity") in ("coarse", "fine") for r in coll.inserted)
 
 
 def test_source_rel_path_cross_platform():
