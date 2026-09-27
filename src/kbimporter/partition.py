@@ -49,6 +49,8 @@ def partitions_for_year_range(
                 continue
             if b == "pre1980":
                 start, end = 0, 1979
+            elif b == "2020s":
+                start, end = 2020, 10**9  # open-ended: year_bucket clamps ≥2030 here
             else:
                 start = int(b[:4])
                 end = start + 9

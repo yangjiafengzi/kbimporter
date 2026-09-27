@@ -49,6 +49,11 @@ def test_partitions_for_year_range():
     assert partitions_for_year_range(None, None) == ACADEMIC_PARTITIONS
 
 
+def test_partitions_for_year_range_includes_open_ended_2020s():
+    assert partitions_for_year_range(2030, 2040) == ["en_2020s", "zh_2020s"]
+    assert "zh_2020s" in partitions_for_year_range(2025, 2035)
+
+
 def test_year_bucket_stays_in_closed_set():
     from kbimporter.partition import _BUCKETS
     for y in range(-5, 5001):
