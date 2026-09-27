@@ -23,6 +23,53 @@
 
 > ⚠️ 检索前若集合未加载，先调用 `milvus_load_collection`；禁用 `milvus_vector_search` / `milvus_hybrid_search`（需要外部嵌入工具，本环境没有）。
 > ⚠️ 内存管理：一次只保留一个集合加载；切换集合前先调用 `milvus_release_collection` 释放当前集合，全部检索结束后释放所有已加载集合。
+> ⚠️ **`academic_library` 已按「语言×年代」分区**：优先用 CLI 按需加载，禁止无脑整库 `load_collection`（见下节）。
+
+## academic_library 分区动态加载
+
+| 部分 | 取值 |
+| --- | --- |
+| 语言 | `zh` / `en` |
+| 年代 | `pre1980` / `1980s` / `1990s` / `2000s` / `2010s` / `2020s` / `unknown` |
+
+分区名 = `{lang}_{bucket}`，例如 `zh_2010s`、`en_unknown`（`year<=0`）。共 14 个分区。
+
+### 实际使用的提示词（Agent 检索 academic_library 时）
+
+```bash
+# 按年份区间加载/检索（推荐）
+kb search --collection academic_library --kind dense "主题词" --year-from 2015 --year-to 2024 --release
+
+# 只查近十年中文
+kb search --collection academic_library --kind dense "主题词" --year-from 2015 --year-to 2024 --lang zh --release
+
+# 直接点名分区
+kb search --collection academic_library --kind bm25 "关键词" --partitions zh_2010s,zh_2020s --release
+
+# 释放分区/整库
+kb release academic_library --partitions zh_2010s
+kb release academic_library
+```
+
+### 示例提示词片段
+
+```markdown
+### 检索 academic_library 时必须按分区加载
+
+1. 优先使用 CLI，显式指定年代范围，检索完 `--release`：
+   kb search --collection academic_library --kind dense "<问题关键词>" --year-from <起> --year-to <止> --release
+2. 若仅有 MCP 且无分区 API：仍不要整库 `load_collection`；
+   可先用上述 CLI 命中，再用 `milvus_query` 按 `source_file`/`parent_id` 回取父块。
+3. `proj_*` / `fieldwork_kb` 仍按「一次只加载一个 Collection」执行。
+4. 全部检索结束后释放已加载的分区/集合。
+```
+
+迁移历史数据到分区（维护者，不重嵌入）：
+
+```bash
+kb repartition academic-library          # dry-run
+kb repartition academic-library --execute
+```
 
 ### Math MCP（仅田野调查数据分析师）
 

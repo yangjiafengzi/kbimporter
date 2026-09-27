@@ -496,9 +496,10 @@ kb search --collection academic_library --kind dense "你的问题"
 | `kb sync-zotero [--dry-run]` | 同步 Zotero 文献 |
 | `kb convert [--dry-run] [--engine marker\|mineru\|cloud]` | 文档转 Markdown |
 | `kb import [--dry-run]` | 增量向量化导入 |
-| `kb release [集合名]` | 释放 Milvus 集合内存（不删数据；不填集合名则释放全部） |
+| `kb release [集合名] [--partitions ...]` | 释放 Milvus 集合/分区内存（不删数据） |
 | `kb dedupe [--dry-run] [--scope project\|library\|all]` | 去重/替换（默认直接执行） |
-| `kb search --collection <集合> --kind dense\|bm25\|query <词> [--filter 表达式] [--release]` | 检索（默认保留加载；`--release` 检索后释放） |
+| `kb search --collection <集合> --kind dense\|bm25\|query <词> [--year-from Y --year-to Y\|--partitions ...] [--filter 表达式] [--release]` | 检索；academic_library 按年份/分区只加载子集 |
+| `kb repartition academic-library [--execute]` | academic_library 语言×年代重分区（向量保真，不重嵌入） |
 | `kb ocr status / mode local\|hybrid [local\|cloud]\|cloud / enable / disable / keys` | OCR 模式、优先级与密钥管理 |
 
 ## 如何选择本地 / 云端 OCR
@@ -657,7 +658,8 @@ kb convert --engine cloud --dry-run
   页数上限、子任务并发数 `max_workers`、卡死判定 `stall_timeout` 等）
 - `[milvus]`：Milvus 地址与 embedding 配置
 
-完整配置参考与开发/测试说明见 [AGENTS.md](AGENTS.md)。
+完整键与注释见 [kb_config.example.toml](kb_config.example.toml)；
+开发/测试流程与 Agent 行为规则见 [AGENTS.md](AGENTS.md)。
 
 ## 配套文档与示例
 
@@ -665,7 +667,7 @@ kb convert --engine cloud --dry-run
   索引配置、增量状态表、检索命令与 filter 语法、写操作禁令。
 - [agents/](agents/)：AI Agent 系统提示词示例（田野调查数据分析师、学术写作顾问），
   来自 KB-Vectorize，可直接复制到支持 MCP 的 AI 客户端使用。
-- [AGENTS.md](AGENTS.md)：维护者与 AI Agent 的行为规则、完整配置参考、开发测试流程。
+- [AGENTS.md](AGENTS.md)：维护者与 AI Agent 的行为规则、架构要点、开发测试流程。
 
 ## License
 

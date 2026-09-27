@@ -58,6 +58,12 @@ class _FakeClient:
     def has_collection(self, collection_name):
         return True
 
+    def load_collection(self, collection_name, **k):
+        pass
+
+    def load_partitions(self, collection_name, partition_names, **k):
+        self.loaded_parts = list(partition_names)
+
     def list_partitions(self, collection_name):
         return ["_default"] + self.created_parts
 

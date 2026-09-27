@@ -1,335 +1,175 @@
 # AGENTS.md
 
-本文件面向维护者、贡献者与 AI Agent：包含设计思想、完整配置参考、命令细节、
-开发测试流程与安全规则。面向普通用户的精简说明见 [README.md](README.md)。
+面向维护者、贡献者与 AI Agent。普通用户说明见 [README.md](README.md)；
+数据库 Schema / 检索语法见 [docs/DB_GUIDE.md](docs/DB_GUIDE.md)。
 
-## 一、设计思想
+## 设计思想
 
-- 本地 Zotero 是文献的终极源头，文件名即文献身份。
-- 所有原始文献最终统一为 Markdown，再进入向量化。
-- 项目文献先人工筛选，再优先从文献库复制同名 MD，避免重复 OCR。
-- “中文比例最低 = 原文”只用于“英文原文 + 中文译本”场景。
-- 增量导入：hash 对比，只处理新增/修改，删除只清对应 `source_file`。
-- 安全第一：任何删除/替换都先移入回收目录，破坏性命令默认 dry-run
-  （`kb dedupe` 例外：默认直接执行，可用 `--dry-run` 预演）。
+- 本地 Zotero 是文献终极源头，**文件名即文献身份**（`作者 - 年份 - 标题.md`）。
+- 一切原始文献先转 Markdown，再进入向量化。
+- 项目文献人工筛选后，优先复用文献库同名 MD，避免重复 OCR。
+- “中文比例最低 = 原文”只用于“英文原文 + 中文译本”；无文字层 PDF 不参与该判定。
+- 增量导入：hash 对比，只处理新增/修改；删除只清对应 `source_file`。
+- 删除/替换一律先移入回收目录（默认 `<知识库>/.kb/trash`），不直接 `rm`。
+- 向量由 **Milvus 服务端**生成（DashScope Function），本机不跑嵌入模型。
 
-## 二、与旧系统对应关系
-
-| 新命令 | 替代的旧脚本 |
-| --- | --- |
-| `kb import` | `0向量化/` 全部（main/config/models/scanner/chunker/importer） |
-| `kb sync-zotero` | `zotero文献库/main.py` |
-| `kb convert` | `ocr/pdf_to_md.py` |
-| `kb dedupe` | `项目文献/clean_duplicates.py` + `zotero文献库/remove_duplicate_pdfs.py` |
-| `kb search` | 原 DB_GUIDE 中的 Milvus 检索示例（只读） |
-
-相比旧脚本的改进：
-
-- 路径、模型、批大小、超时全部配置化，不再硬编码。
-- API 密钥只从环境变量读取（旧 OCR 脚本曾明文存放密钥）。
-- 所有删除改为移入回收目录（默认 `<知识库>/.kb/trash`）。
-- OCR 转换前检查同名 MD 已存在则跳过，避免重复 OCR。
-- 项目文献替换时，本程序生成的 OCR MD 会被知识库内 `zotero文献库/library/` 中同名 MD
-  顶替（该目录中的 MD 本身也多为 OCR 产物，单向替换合理；旧文件进回收目录）。
-- 每条命令都支持 dry-run 预演。
-- 空项目集合只删真正为空的，防止状态缺失时误删有数据集合。
-
-## 三、模块结构
+## 架构
 
 ```text
 src/kbimporter/
-├── cli.py         # 命令入口（argparse）
+├── cli.py         # argparse 入口（kb -> cli:main）
 ├── config.py      # 配置模型与加载（TOML + 环境变量）
-├── config_edit.py # 配置写入（section.key 行级编辑）
-├── util.py        # 哈希/编码/回收目录/日志
-├── chunker.py     # 双层切片
-├── scanner.py     # 扫描/分类/增量状态/SQLite
-├── models.py      # Milvus Schema 与集合管理（MilvusClient API）
+├── config_edit.py # section.key 行级写入配置
+├── util.py        # 哈希 / 编码 / 回收目录 / 日志
+├── chunker.py     # 双层切片（coarse/fine，按 UTF-8 字节长度）
+├── scanner.py     # 扫描分类、增量状态、SQLite
+├── models.py      # Milvus Schema / 集合管理（MilvusClient）
 ├── importer.py    # 增量导入编排
 ├── zotero_sync.py # Zotero storage -> 文献库
 ├── convert.py     # MarkItDown + marker/mineru/cloud 引擎链
-├── cloud_ocr.py   # 云端 OCR：paddle / mineru / baidu / openai（异步任务/分批/断点/回退链）
-├── dedupe.py      # 去重/替换/清理
-├── inspect.py     # 状态文件与 Milvus 集合扫描
+├── cloud_ocr.py   # 云端 OCR：paddle / mineru / baidu / openai
+├── dedupe.py      # 去重 / 替换 / 清理
+├── inspect.py     # 状态库与 Milvus 扫描
 ├── doctor.py      # 环境体检（多 Python 环境探测）
-├── progress.py    # 终端进度面板（线程安全跟踪器 + 渲染器）
+├── progress.py    # 终端进度面板（线程安全）
 └── setup.py       # 安装引导
 ```
 
-## 四、配置参考
+三库分构（集合互不污染）：
 
-配置文件为 `kb_config.toml`（模板见 `kb_config.example.toml`，`kb init` 可生成）。
+| 来源 | 目录 | 集合 | 特有字段 |
+| --- | --- | --- | --- |
+| Zotero 文献库 | `zotero文献库/library/` | `academic_library` | `language, author, year, title` |
+| 项目文献 | `项目文献/<项目名>/` | `proj_<项目名拼音>` | `project_name, language, author, year, title` |
+| 田野笔记 | `田野调查笔记/<项目>/` | `fieldwork_kb` | `source_type, source_path, project_name, location, research_date, researchers, notes` |
 
-### `[paths]`
+共享字段：`id, text, source_file, chunk_index, granularity, parent_id, vector, sparse, created_at`。
+`source_file` 是增量更新/删除的唯一锚点（相对知识库根）。
+`_项目信息.md` 不切片，只解析为田野元数据，改动后 upsert 该项目全部记录。
 
-| 键 | 默认 | 说明 |
-| --- | --- | --- |
-| `kb_root` | 必填/`KB_ROOT` | 知识库根目录 |
-| `library_dir` | `<kb_root>/zotero文献库/library` | Zotero 文献库 |
-| `project_root` | `<kb_root>/项目文献` | 项目文献 |
-| `fieldwork_root` | `<kb_root>/田野调查笔记` | 田野调查笔记 |
-| `zotero_storage` | `~/Zotero/storage` | Zotero 附件源 |
-| `state_dir` | `<kb_root>/.kb` | 状态目录 |
-| `state_db` | `<state_dir>/state.db` | 增量状态库（可直接指向旧版 import_state.db 复用） |
-| `trash_dir` | `<state_dir>/trash` | 回收目录 |
-| `scan_dir` | `<kb_root>` | convert 扫描目录 |
-| `ocr_work_dir` | `<kb_root>/ocr/_convert_work` | 转换工作目录 |
-| `ocr_log_file` | `<state_dir>/logs/convert.log` | 转换日志（追加） |
+`academic_library` 另有**语言×年代手工分区**（`{zh|en}_{pre1980|1980s|…|2020s|unknown}`，14 个）。
+检索应用 `--year-from/to` 或 `--partitions` 只 `load_partitions`，禁止无脑整库 `load_collection`。
+历史数据用 `kb repartition academic-library`（默认 dry-run，`--execute` 执行）向量保真搬迁，**0 次嵌入调用**。
+详见 [docs/DB_GUIDE.md](docs/DB_GUIDE.md) 分区专节。
 
-### `[milvus]`
+## 配置
 
-`host` / `port` / `embedding_provider` / `embedding_model` / `embedding_dim` /
-`hnsw_m` / `hnsw_ef_construction` / `batch_size`。
+`kb_config.toml`（模板 `kb_config.example.toml`，`kb init` 生成）。
+查找顺序：`--config` > `KB_CONFIG` > 当前目录 `kb_config.toml` > 项目根 >
+`%APPDATA%\kbimporter`（macOS/Linux：`~/.config/kbimporter`）。
+`--config` 是全局参数，放在子命令前后均可。
 
-向量由 Milvus 服务端生成：集合 Function 使用 `provider=dashscope` +
-`model=text-embedding-v3`，密钥配置在 Milvus 服务端，本机不需要。
+完整键与注释以 `kb_config.example.toml` 为准。必须知道的点：
 
-### `[chunk]`
+- **密钥只从环境变量读**，禁止写入代码或配置。`api_key_env` 指定变量名。
+- **两组 DashScope 配置不要混**：
+  - Milvus 向量化：服务端 `MILVUSAI_DASHSCOPE_API_KEY`（或 `deploy/user.yaml`），
+    本机**不需要** `DASHSCOPE_API_KEY`。自定义端点必须用原生
+    `/api/v1/services/embeddings/text-embedding/text-embedding`，
+    不能用 OpenAI `compatible-mode/v1`（否则 404 或 `embedding:[0]`）。
+  - 云端 OCR（`openai` provider）：本机 `DASHSCOPE_API_KEY` + compatible-mode base_url。
+- `[paths].state_db` 可直接指向旧版 `0向量化/import_state.db`：程序不迁移、不加表、
+  不改结构；缺 `file_origin` 表时自动降级为未知来源。
+- `[converter].engines` 默认 `["marker","mineru","cloud"]`；`cloud` 仅在
+  `cloud_ocr.enabled=true` 时生效。
+- `cloud_ocr.enabled` 默认 **false**。云端 OCR 产生费用且文档会出网，只有用户显式确认后才启用。
+- `[dedupe].replace_existing_md`：`ocr_only`（默认，只顶替本程序记录的 OCR 产物）/
+  `always` / `never`。未知来源 MD 默认不覆盖。
+- Python 3.13+ 下 `[ocr]` 重型依赖（PyTorch 等）可能无预编译 wheel；本地 OCR 建议 3.11/3.12。
 
-`coarse_size=8192` / `coarse_overlap=1024` / `fine_size=1024` /
-`fine_overlap=256` / `separators=["\n\n","\n","。","！","？","；","，"," "]`。
+### 云端 OCR 行为（改 `cloud_ocr.py` 时必须保持）
 
-### `[converter]`
+- 429 分两种：`code=12002` / “请求频率过高”是**限流**，退避重试，不换 provider；
+  “额度已用完 / 配额不足 / 余额不足”或 MinerU `-60018` 才是**额度耗尽**，
+  抛 `CloudQuotaError` 熔断并切 `fallback_providers`，本次运行剩余文件跳过该 provider。
+- 其他错误（500/503/504 等）一律先退避重试，耗尽后才回退。
+- 超过 `max_pages_per_task`（paddle 100 / mineru 200）自动拆子 PDF，按页序合并；
+  已完成子任务断点续传，不重复提交。
+- 子任务按 `max_workers`（默认 5）持续并发；失败/额度耗尽取消未启动任务。
+  `stall_timeout`（默认 900s）进度不增长视为卡死并重新提交。
 
-`marker_cmd` / `marker_single_cmd` / `markitdown_cmd` / `marker_workers` /
-`max_per_batch` / `timeout_per_pdf` / `timeout_retry_pdf` / `engines` /
-`mineru_cmd` / `mineru_backend` / `mineru_method` / `mineru_model_source` /
-`enable_llm` / `llm_base_url` / `llm_model` / `after_convert` /
-`skip_existing_md` / `skip_dirs` / `skip_exts` / `markitdown_exts`。
+## 命令
 
-`engines` 默认 `["marker","mineru","cloud"]`；`cloud` 仅在 `cloud_ocr.enabled=true`
-时生效。
-
-### `[sync]`
-
-`target_extensions = [".pdf",".epub"]`。
-
-### `[dedupe]`
-
-`supported_extensions = [".pdf",".epub"]`；
-`replace_existing_md = "ocr_only" | "always" | "never"`。
-
-### `[cloud_ocr]`
-
-`enabled`（默认 false，必须显式开启）/ `provider`（`paddle` 首选 /
-`mineru` / `baidu` / `openai`）/ `fallback_providers`（主 provider 失败后
-依次尝试的备选，如 `["mineru"]`）/ `max_files_workers`（多个 PDF 文件之间的并发数，
-默认 2）/ `state_dir`。
-
-#### `[cloud_ocr.paddle]`
-
-PaddleOCR 云端异步任务 API：
-
-```toml
-job_url = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
-model = "PaddleOCR-VL-1.6"
-api_key_env = "PADDLE_OCR_API_KEY"
-poll_interval = 5
-max_poll_seconds = 7200
-max_pages_per_task = 100
+```text
+kb init --root <路径> [--output <配置>] [--interactive|--non-interactive] [--force]
+kb status | kb doctor [--deep] | kb scan [--state-only|--milvus-only] | kb setup
+kb sync-zotero [--dry-run]
+kb convert [--dry-run] [--scan-dir <目录>] [--engine auto|marker|mineru|cloud]
+kb import [--dry-run]
+kb dedupe [--dry-run] [--scope project|library|all] [--replace-existing]
+kb ocr status|mode|enable|disable|keys
+kb release [集合名] [--partitions zh_2010s,...]
+kb search --collection <集合> --kind dense|bm25|query [<词>] \
+  [--partitions ...] [--year-from Y --year-to Y] [--lang zh|en] \
+  [--filter <expr>] [--limit N] [--release]
+kb repartition academic-library [--execute] [--batch-size N]
+kb shell-init [--apply]
+kb help [命令]
 ```
 
-流程：超过 `max_pages_per_task` 页时先按页拆分子 PDF -> 各子任务 multipart 提交 ->
-轮询 jobId -> 下载 JSONL -> 解析 `layoutParsingResults[].markdown.text` ->
-按页缓存并按页序合并。断点续传：已完成子任务不重复提交。
-额度规则：每模型每日 3000 页。HTTP 429 需按响应体区分：`code=12002` /
-“请求频率过高，请稍后重试”是**限流**，按 `Retry-After` 或指数退避重试，不切换
-provider；响应体出现“超出单日解析最大页数 / 额度已用完 / 配额不足 / 余额不足”等
-明确额度字样（或 MinerU `-60018`）才抛 `CloudQuotaError` 并熔断切换，且本次运行
-剩余文件直接跳过该 provider。其他错误（500/503/504、解析失败等）一律先按退避重试，
-重试耗尽后才回退。
-子任务按 `max_workers`（默认 5）持续并发（完成一个立刻补下一个），
-任一失败/额度耗尽即取消未启动任务并通知运行中任务退出；
-`stall_timeout`（默认 900s）内进度不增长判定卡死并重新提交。
+非显而易见的行为：
 
-#### `[cloud_ocr.mineru]`
+- **写操作不会默认 dry-run**。`import` / `sync-zotero` / `convert` 的 `--dry-run`
+  需显式加；`kb dedupe` **默认直接执行**（文件进回收目录）。Agent 在真实导入/转换前
+  必须先 dry-run 并说明影响。
+- `status` / `scan` / `doctor`（无 `--deep`）/ `search` / `release` 只读。
+  `doctor --deep` 是写操作：临时建删 `_probe_kbimporter`，只碰该集合。
+- `kb release [集合]` 只卸载 Milvus 内存，**不删数据**；不填集合名释放全部。
+  `kb search` 默认保留加载以便连续检索，`--release` 检索后释放。
+- `kb init` 会读 Zotero `prefs.js` 的 `extensions.zotero.dataDir`，自动修正
+  `zotero_storage`（否则同步出空目录）；`doctor`/`status` 对不一致给出警告。
+- `kb convert`：同名 MD 已存在则跳过（`skip_existing_md`）；`--engine` 强制单引擎。
+  TTY 下有实时进度面板，管道/重定向自动退化为普通日志。
+- `kb sync-zotero`：按基础名分组选中文比例最低版本；无文字层 PDF 标记为扫描件，
+  不参与“中文比例最低=原文”，同步结束输出扫描件清单。
+- `kb ocr enable --provider paddle --fallback mineru` = hybrid local（推荐）；
+  `hybrid cloud` 引擎链为 `cloud -> marker -> mineru`。写入 `converter.engines` 与
+  `cloud_ocr.*`。`kb ocr keys` 在 Windows 查注册表，Unix 读 shell 配置文件中的 export。
+- `kb shell-init --apply` 幂等写入 shell 启动项；macOS/Linux 的软链只打印不自动执行。
+- `kb dedupe --execute` 已废弃（会被忽略并警告）。
+- 空项目集合只删真正为空的 `proj_*`（状态库无记录且 `row_count==0`），防误删。
+- `kb search --year-from/--year-to/--partitions` 只加载 academic_library 对应分区；
+  `kb release --partitions` 卸载子集。`kb repartition` 默认 dry-run，`--execute` 才搬迁。
+  迁移时 `delete` 必须限定 `partition_name="_default"`，否则会误删新分区数据。
 
-MinerU 精准解析云 API（token 从 `api_key_env` 指定的环境变量读取）：
+## 状态库（SQLite）
 
-```toml
-upload_url = "https://mineru.net/api/v4/file-urls/batch"
-result_url = "https://mineru.net/api/v4/extract-results/batch"
-api_key_env = "MINERU_API_KEY"
-model_version = "vlm"   # pipeline / vlm（推荐）/ MinerU-HTML
-is_ocr = true
-enable_formula = true
-enable_table = true
-language = "ch"
-poll_interval = 5
-max_poll_seconds = 7200
-max_pages_per_task = 200
-```
+| 表 | 用途 |
+| --- | --- |
+| `file_state` | 路径、hash、status、collection、chunk_count |
+| `project_meta_state` | 田野项目元数据 hash |
+| `file_origin` | MD 来源（`zotero_md` / `ocr_md`），驱动替换策略 |
 
-流程：申请上传链接 -> PUT 上传整份 PDF -> 轮询 `extract-results/batch/{batch_id}`
--> 下载结果 zip 并解出 `full.md`。超过 `max_pages_per_task` 页时自动拆分多个
-子任务，识别完成后按页序合并；断点续传，已完成子任务不重复提交。
-日额度错误（`-60018`，或响应体明确额度字样）映射为 `CloudQuotaError` 并立即切换通道；
-429 限流（请求频率过高）同样按退避重试处理；
-子任务并发与 `stall_timeout` 卡死检测行为同 PaddleOCR。
+复用旧 `import_state.db` 时程序不会迁移或改表；缺 `file_origin` 自动降级。
 
-#### `[cloud_ocr.baidu]`
-
-百度智能云 `accurate_basic`，OAuth token + 每页图片请求，支持并发。
-
-#### `[cloud_ocr.openai]`
-
-OpenAI 兼容视觉接口（默认 DashScope qwen3-vl-plus），每请求可包含多页图片。
-
-## 五、命令详细说明
-
-所有命令支持 `--config <路径>`（默认读取当前目录 `kb_config.toml`），
-也可用 `KB_ROOT` 环境变量指定知识库根目录。`--config` 是全局参数，放在
-子命令前后均可：`kb --config <路径> doctor` 与 `kb doctor --config <路径>` 等价。
-
-### `kb init`
-
-```bash
-kb init --root <知识库路径> [--output <配置路径>] [--interactive] [--force]
-```
-
-生成 `kb_config.toml` 并创建 `zotero文献库/library`、`项目文献`、
-`田野调查笔记`、`.kb` 目录。终端交互模式询问显卡并推荐 OCR 方案。
-自动读取 Zotero `prefs.js` 的 `extensions.zotero.dataDir`，检测到自定义
-数据目录时把 `[paths].zotero_storage` 填为 `<dataDir>/storage`。
-
-### `kb status` / `kb scan` / `kb doctor`
-
-三者默认均只读。`doctor` 会探测当前解释器之外的其他 Python 环境
-（miniconda base、conda envs、系统 Python），报告依赖可复用情况；
-环境变量提示按 `cloud_ocr.provider` 精准给出。
-`doctor` / `status` 会检测 Zotero 自定义数据目录，与配置不一致时给出警告。
-Milvus 只报 TCP 可达性，默认标注“向量化链路未验证，请运行 `kb doctor --deep`”，
-并提示服务端 `MILVUSAI_DASHSCOPE_API_KEY` 检查点；Python 3.13+ 时提示本地
-OCR 重型依赖可能缺少预编译 wheel。
-`kb doctor --deep` 是显式写操作：临时创建并删除 `_probe_kbimporter` 集合，
-用于端到端嵌入体检，只碰该临时集合。
-
-### `kb setup`
-
-先运行 doctor 体检，再询问显卡与 OCR 方案（本地 / 云端 / 混合），
-按方案安装对应 extras：核心 `[import,sync,dedupe]` 始终安装，本地/混合
-加 `[ocr]`，云端/混合加 `[cloud]`；随后按需创建、复用虚拟环境或补装
-依赖，可自动写入配置。非交互模式只打印按方案安装的命令提示。
-Python 3.13+ 且选择本地 OCR 时提示改用 3.11/3.12 或云端 OCR。
-
-### `kb shell-init`
-
-```bash
-kb shell-init [--apply] [--config <路径>]
-```
-
-一键生成“全局命令 + 全局配置”的 shell 启动项：打印需加入 `~/.zshrc` /
-`~/.bash_profile`（Windows 为 PowerShell `$PROFILE`）的内容；`--apply`
-自动写入（幂等）。macOS/Linux 的软链命令只打印、不自动执行。
-
-### `kb import`
-
-增量导入，非 dry-run 时写状态库并调用 Milvus。dry-run 只读：
-不写状态库、不调用 Milvus。首次使用旧状态库时可直接把 `state_db`
-指向旧 `import_state.db` 复用（程序不会给旧库加表）。
-
-### `kb sync-zotero`
-
-按基础名分组，选中文比例最低的版本（原版）复制到文献库；清理过期记录。
-删除操作进回收目录。无可提取文字层的 PDF 标记为“无文字层（疑似扫描件）”，
-不参与“中文比例最低=原文”的判定（同一文献优先选文字版），同步结束输出
-扫描件清单；历史记录新增 `has_text` 字段（旧记录缺省视为有文字层）。
-
-### `kb convert`
-
-引擎链顺序由 `converter.engines` 决定；已存在同名 MD 的文件默认跳过。
-`--engine marker|mineru|cloud` 可强制指定。
-
-### `kb ocr`
-
-```bash
-kb ocr status
-kb ocr mode local|hybrid [local|cloud]|cloud [--provider paddle|mineru|baidu|openai] [--fallback mineru|none]
-kb ocr enable [--provider paddle] [--fallback mineru]
-kb ocr disable
-kb ocr keys
-```
-
-写入配置：`converter.engines` 与 `cloud_ocr.enabled/provider/fallback_providers`。
-`hybrid local` 写入 `engines=["marker","mineru","cloud"]`（本地优先）；
-`hybrid cloud` 写入 `engines=["cloud","marker","mineru"]`（云端优先，云端失败后
-用 marker_single / mineru 本地兜底）。`hybrid` 不带优先级默认本地优先。
-
-常用示例：
-
-```bash
-# 本地优先 + PaddleOCR -> MinerU 云端次选（推荐）
-kb ocr enable --provider paddle --fallback mineru
-# 云端优先 + 云端内部回退链
-kb ocr mode hybrid cloud --provider paddle --fallback mineru
-# 关闭云端，只留本地
-kb ocr mode local
-```
-
-MinerU 云端需要设置环境变量 `MINERU_API_KEY`（由 `[cloud_ocr.mineru].api_key_env`
-指定），密钥不写入配置或代码。`kb ocr keys` / `kb doctor` 可检查是否已设置。
-`kb ocr keys` 在 Windows 检查注册表用户/系统作用域；macOS/Linux 检测
-`~/.zshrc` / `~/.zshenv` / `~/.bash_profile` / `~/.bashrc` / `~/.profile`
-及 fish `config.fish` 中的 `export KEY=...` / `set -gx KEY ...`。
-
-### `kb dedupe`
-
-默认直接执行（删除/替换先进回收目录）；`--dry-run` 只预演；
-`--scope project|library|all`；
-`--replace-existing` 强制用文献库 MD 顶替现有 MD。替换前按
-`file_origin`（`zotero_md` / `ocr_md` / 未知）决定是否覆盖。
-
-### `kb search`
-
-```bash
-kb search --collection <集合名> --kind dense|bm25|query <查询词> [--filter <expr>]
-```
-
-## 六、状态库与来源记录
-
-状态库表：
-
-- `file_state`：文件路径、hash、status、collection、chunk_count
-- `project_meta_state`：田野项目元数据 hash
-- `file_origin`：MD 来源（`zotero_md` / `ocr_md`），用于替换策略
-
-复用旧版 `0向量化/import_state.db`：把 `[paths].state_db` 指向该文件即可；
-程序不会迁移、不会新增表、不会修改其结构（缺 `file_origin` 时自动降级为未知来源）。
-
-## 七、开发与测试
+## 开发与测试
 
 ```bash
 python -m venv .venv
-.venv\Scripts\pip install -e ".[dev]"
+.venv\Scripts\pip install -e ".[dev]"          # macOS/Linux: .venv/bin/pip
 .venv\Scripts\python -m pytest tests -q
+.venv\Scripts\python -m pytest tests/test_cli.py::test_cli_help_command -q   # 单测
 ```
 
-测试全部使用临时目录与 Mock（`tests/conftest.py` 提供假 pymilvus），
-不触碰真实知识库与 Milvus。
+- 测试**不连接真实 Milvus、不读真实知识库**。`tests/conftest.py` 注入假 pymilvus
+  并跳过 TCP 预检；pymilvus 可不装。PDF/拼音相关用例需要对应 extras（懒导入）。
+- 打包：`pip install build && python -m build`，产物在 `dist/`。
+- 无 lint/typecheck 工具链，验证以 pytest 为准。
+- 发行包不捆绑第三方依赖，按 extras 装：`[import,sync,dedupe]` 核心；
+  `[ocr]` 本地转换（含 PyTorch）；`[cloud]` 云端 OCR；`[search]` 检索。
+- `agents/` 是可分发的 Agent 提示词范例；`agents_nopush/` 本地专用且被 gitignore。
 
-打包：
+## Agent 行为规则
 
-```bash
-pip install build
-python -m build
-```
-
-产物在 `dist/`。
-
-## 八、对 Agent 的行为规则
-
-1. 不得修改、删除、迁移用户的旧状态库（`0向量化/import_state.db`）与 Milvus 集合。
-2. 任何真实导入/转换前必须先 dry-run，并向用户说明费用与影响；`kb dedupe`
-   默认直接执行（删除/替换先进回收目录），如需预演先运行 `kb dedupe --dry-run`。
-3. 删除/替换必须先移入回收目录，不直接 `rm`。
+1. **不得**修改、删除、迁移用户的旧状态库（`0向量化/import_state.db`）与既有 Milvus 集合结构。
+2. 真实导入/转换前必须先 `--dry-run`，并向用户说明费用与影响。
+   `kb dedupe` 默认直接执行，需要预演时先 `kb dedupe --dry-run`。
+3. 删除/替换必须先移入回收目录，不直接 `rm` / 清空集合。
 4. 云端 OCR 默认关闭；只有用户显式确认后才启用。
-5. 密钥只从环境变量读取，禁止写入代码或配置。
+5. 密钥只从环境变量读取，禁止写入代码或配置文件。
 6. 测试不得连接真实 Milvus 或读取真实知识库数据。
-7. 不碰无关集合：只处理用户指定的集合，绝不顺带动其他集合。
-8. 最小化影响：能增量更新就不全量重建，能重建一个集合就不重建全部。
-9. 事故案例（2026-06-03）：某 Agent 仅需给 `proj_cunganbuleixing` 添加字段，
-   却擅自运行 `_rebuild.py`，导致三个集合全部被删除重建，造成 DashScope API 费用损失
-   与大量时间浪费。任何重建类操作都必须先获得用户明确许可。
-
-数据库结构详细说明（Schema、父子块、索引、检索与 filter 语法）见
-[docs/DB_GUIDE.md](docs/DB_GUIDE.md)；Agent 提示词示例见 [agents/](agents/)。
+7. 不碰无关集合：只处理用户指定的集合。
+8. 最小化影响：能增量就不全量重建；能重建一个集合就不重建全部。
+9. **事故案例（2026-06-03）**：某 Agent 只需给 `proj_cunganbuleixing` 添加字段，
+   却擅自运行 `_rebuild.py`，导致三个集合全部删除重建，造成 DashScope API 费用损失
+   与大量时间。**任何重建/删集合类操作都必须先获得用户明确许可。**

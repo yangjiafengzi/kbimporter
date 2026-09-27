@@ -219,6 +219,42 @@ file_origin:
 老版本用户可把 `[paths].state_db` 直接指向旧 `import_state.db` 继续增量；
 程序不会迁移旧库，缺 `file_origin` 表时自动按“未知来源”处理。
 
+## 九点五、分区（academic_library）
+
+`academic_library` 按 **语言 × 年代** 做手工分区，支持按需 `load_partitions`，避免整库进内存。
+
+| 部分 | 取值 |
+| --- | --- |
+| 语言 | `zh` / `en` |
+| 年代 | `pre1980` / `1980s` / `1990s` / `2000s` / `2010s` / `2020s` / `unknown` |
+
+分区名 = `{lang}_{bucket}`，例如 `zh_2010s`、`en_unknown`（`year<=0`）。共 14 个分区。
+`year ≥ 2030` 记入 `2020s`（当前开放式桶）。
+
+```bash
+# 只加载/检索 2015–2022 覆盖的分区
+kb search --collection academic_library --kind dense "村干部" --year-from 2015 --year-to 2022
+
+# 直接点名分区
+kb search --collection academic_library --kind dense "村干部" --partitions zh_2010s,zh_2020s
+
+# 释放
+kb release academic_library --partitions zh_2010s
+```
+
+- 不带 `--partitions` / `--year-*` 时仍 `load_collection` 整库加载（兼容旧行为）。
+- **禁止**在只需要若干年代时对 `academic_library` 无脑 `load_collection`。
+- 新导入的学术文献会按 `language+year` 自动写入对应分区（`process_academic`）。
+- 历史数据迁移（向量保真，**不**重新嵌入、不产生 DashScope 费用）：
+
+```bash
+kb repartition academic-library           # dry-run
+kb repartition academic-library --execute # 真正执行
+```
+
+迁移原理：临时摘掉 `text_dense_emb` Function → 导出并写回 dense 向量 → 重映射
+`parent_id` → 清空 `_default` → 恢复 Function。BM25 稀疏向量由 text 免费重算。
+
 ## 十、检索方式
 
 ### 10.1 命令行（推荐日常使用）
