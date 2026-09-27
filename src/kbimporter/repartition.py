@@ -166,12 +166,13 @@ def run_repartition(
         if parts_seen:
             client.load_partitions(collection_name=target, partition_names=parts_seen)
 
+        # 先校验再删 _default，失败时原件仍在，可回滚
+        if migrated != total:
+            raise RuntimeError(f"行数校验失败: 导出 {total}, 写入 {migrated}；未删除 _default")
+
         # 只清 _default：不带 partition_name 的 "id >= 0" 会连新建分区一起删掉
         client.delete(collection_name=target, filter="id >= 0", partition_name="_default")
         log.info("已清空 _default 旧数据")
-
-        if migrated != total:
-            raise RuntimeError(f"行数校验失败: 导出 {total}, 写入 {migrated}")
 
         _add_dense_function(client, target, cfg)
         log.info("已恢复 Function %s", _DENSE_FN)

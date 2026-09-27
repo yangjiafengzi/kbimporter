@@ -156,7 +156,7 @@ def process_academic(fp: Path, text: str, info: dict, cfg: Config,
     if not coarse:
         return 0
     lang = detect_language(fp.name)
-    part = academic_partition_name(lang, int(info.get("year") or 0))
+    part = academic_partition_name(lang, info.get("year") or 0)
     client = ensure_connected(cfg)
     ensure_partitions(client, "academic_library", [part])
     base = {
