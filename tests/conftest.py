@@ -116,8 +116,25 @@ class _FakeMilvusClient:
         pass
 
 
+class _FakeFunction:
+    def __init__(self, name=None, input_field_names=None, output_field_names=None,
+                 function_type=None, params=None, **kwargs):
+        self.name = name
+        self.input_field_names = input_field_names or []
+        self.output_field_names = output_field_names or []
+        self.function_type = function_type
+        self.params = params or {}
+
+
+class _FakeFunctionType:
+    TEXTEMBEDDING = "TEXTEMBEDDING"
+    BM25 = "BM25"
+
+
 class _FakePymilvus(types.ModuleType):
     MilvusClient = _FakeMilvusClient
+    Function = _FakeFunction
+    FunctionType = _FakeFunctionType
 
 
 if "pymilvus" not in sys.modules:

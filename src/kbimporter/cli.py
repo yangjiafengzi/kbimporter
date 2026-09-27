@@ -627,6 +627,20 @@ def cmd_dedupe(args):
     return 0
 
 
+def cmd_repartition(args):
+    cfg = _config(args)
+    log = setup_logging()
+    from kbimporter.repartition import run_repartition
+    target = (args.target or "academic_library").replace("-", "_")
+    return run_repartition(
+        cfg,
+        dry_run=not args.execute,
+        collection=target,
+        batch_size=args.batch_size,
+        logger=log,
+    )
+
+
 def cmd_release(args):
     cfg = _config(args)
     log = setup_logging()
@@ -820,6 +834,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--replace-existing", action="store_true",
                    help="强制用 Zotero 库 MD 替换现有 MD（含未知来源）")
     p.set_defaults(func=cmd_dedupe)
+
+    p = sub.add_parser(
+        "repartition",
+        help="academic_library 按语言×年代重分区（向量保真，不重嵌入；默认 dry-run）",
+    )
+    _add_config_arg(p)
+    p.add_argument("target", nargs="?", default="academic_library",
+                   help="目前仅支持 academic_library")
+    p.add_argument("--execute", action="store_true",
+                   help="真正执行迁移（默认 dry-run）")
+    p.add_argument("--batch-size", type=int, default=200)
+    p.set_defaults(func=cmd_repartition)
 
     p = sub.add_parser("release", help="释放 Milvus 集合（仅卸载内存，不删除数据）")
     _add_config_arg(p)
