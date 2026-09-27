@@ -651,9 +651,15 @@ def cmd_release(args):
         print("当前没有可释放的集合")
         return 0
     for name in names:
+        parts = getattr(args, "partitions", None)
         try:
-            client.release_collection(collection_name=name)
-            print(f"已释放: {name}")
+            if parts:
+                plist = [x.strip() for x in parts.split(",") if x.strip()]
+                client.release_partitions(collection_name=name, partition_names=plist)
+                print(f"已释放分区: {name} {plist}")
+            else:
+                client.release_collection(collection_name=name)
+                print(f"已释放: {name}")
         except Exception as e:
             log.warning(f"释放 {name} 失败: {e}")
             print(f"释放失败: {name}: {e}")
@@ -664,12 +670,36 @@ def cmd_search(args):
     cfg = _config(args)
     log = setup_logging()
     from kbimporter.models import get_client
+    from kbimporter.partition import partitions_for_year_range
+
     client = get_client(cfg)
     coll_name = args.collection
     if not client.has_collection(collection_name=coll_name):
         print(f"集合不存在: {coll_name}")
         return 2
-    client.load_collection(collection_name=coll_name)
+
+    parts = None
+    if getattr(args, "partitions", None):
+        parts = [p.strip() for p in args.partitions.split(",") if p.strip()]
+    elif getattr(args, "year_from", None) or getattr(args, "year_to", None):
+        if coll_name == "academic_library":
+            parts = partitions_for_year_range(
+                getattr(args, "year_from", None),
+                getattr(args, "year_to", None),
+                getattr(args, "lang", None),
+            )
+        else:
+            print("提示: --year-from/to 仅对 academic_library 做分区裁剪，本集合将整库加载")
+
+    if parts:
+        client.load_partitions(collection_name=coll_name, partition_names=parts)
+    else:
+        client.load_collection(collection_name=coll_name)
+
+    search_kwargs = {}
+    if parts:
+        search_kwargs["partition_names"] = parts
+
     try:
         output_fields = ["text", "source_file", "granularity", "parent_id", "chunk_index"]
         extra = {
@@ -686,6 +716,7 @@ def cmd_search(args):
                 filter=args.filter,
                 output_fields=output_fields,
                 limit=args.limit,
+                **search_kwargs,
             )
             for r in results:
                 print("=" * 60)
@@ -702,6 +733,7 @@ def cmd_search(args):
                 limit=args.limit,
                 output_fields=output_fields,
                 filter=args.filter or "",
+                **search_kwargs,
             )
         else:
             results = client.search(
@@ -712,6 +744,7 @@ def cmd_search(args):
                 limit=args.limit,
                 output_fields=output_fields,
                 filter=args.filter or "",
+                **search_kwargs,
             )
         for i, hit in enumerate(results[0], 1):
             print("=" * 60)
@@ -723,7 +756,10 @@ def cmd_search(args):
         return 0
     finally:
         if getattr(args, "release", False):
-            client.release_collection(collection_name=coll_name)
+            if parts:
+                client.release_partitions(collection_name=coll_name, partition_names=parts)
+            else:
+                client.release_collection(collection_name=coll_name)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -851,6 +887,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_arg(p)
     p.add_argument("collection", nargs="?", default=None,
                    help="集合名；不填则释放全部集合")
+    p.add_argument("--partitions", help="仅释放这些分区，逗号分隔")
     p.set_defaults(func=cmd_release)
 
     p = sub.add_parser("search", help="检索 Milvus（只读）")
@@ -861,7 +898,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--filter", help="filter_expr，如 year >= 2020")
     p.add_argument("--limit", type=int, default=5)
     p.add_argument("--release", action="store_true",
-                   help="检索结束后释放该集合（默认保留加载以便连续检索）")
+                   help="检索结束后释放该集合/分区（默认保留加载以便连续检索）")
+    p.add_argument("--partitions", help="仅加载/检索这些分区，逗号分隔，如 zh_2010s,en_2010s")
+    p.add_argument("--year-from", type=int, help="起始年份（映射到 academic_library 分区）")
+    p.add_argument("--year-to", type=int, help="结束年份")
+    p.add_argument("--lang", choices=["zh", "en"], help="限定语言分区")
     p.set_defaults(func=cmd_search)
 
     return parser
