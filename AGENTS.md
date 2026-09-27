@@ -50,6 +50,7 @@ src/kbimporter/
 `academic_library` 另有**语言×年代手工分区**（`{zh|en}_{pre1980|1980s|…|2020s|unknown}`，14 个）。
 检索应用 `--year-from/to` 或 `--partitions` 只 `load_partitions`，禁止无脑整库 `load_collection`。
 历史数据用 `kb repartition academic-library`（默认 dry-run，`--execute` 执行）向量保真搬迁，**0 次嵌入调用**。
+Agent 提示词模板（示例 + 实际使用）见 [agents/partition_loading_prompts.md](agents/partition_loading_prompts.md)。
 详见 [docs/DB_GUIDE.md](docs/DB_GUIDE.md) 分区专节。
 
 ## 配置

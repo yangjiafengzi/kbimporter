@@ -123,14 +123,21 @@
 | `milvus_query` | 精确过滤查询（回取父块、回溯源文本） | `filter_expr, output_fields, limit` |
 
 > ⚠️ **检索前**：若 Collection 未加载，先调用 `milvus_load_collection(collection_name=...)`。
-> ⚠️ **内存管理（academic_library 已分区）**：
-> 1. 检索 `academic_library` **必须**按年代/分区加载，禁止整库 `load_collection`：
->    - 优先 CLI：`kb search --collection academic_library --kind dense "问题" --year-from <起> --year-to <止> [--lang zh|en] [--release]`
->    - 或点名分区：`--partitions zh_2010s,zh_2020s`
->    - 分区名 = `{zh|en}_{pre1980|1980s|1990s|2000s|2010s|2020s|unknown}`，共 14 个。
->    - 若仅有 MCP 且无分区 API：先用 CLI 按年份检索，再用 `milvus_query` 回取父块；仍不要整库加载。
-> 2. `proj_*` 仍按「一次只加载一个 Collection」执行。
-> 3. 全部检索结束后释放已加载的分区/集合（`kb release academic_library --partitions ...` 或 `milvus_release_collection`）。
+> ⚠️ **内存管理（academic_library 已分区，必须遵守）**：
+> 1. 检索 `academic_library` **必须**按年代/分区加载，**禁止整库 `load_collection`**（约 77 万行会撑爆内存）。
+> 2. **实际使用提示词**（从问题推断年代后执行，结束加 `--release`）：
+>    ```bash
+>    kb search --collection academic_library --kind dense "<关键词>" --year-from <起> --year-to <止> [--lang zh|en] --release
+>    kb search --collection academic_library --kind bm25 "<关键词>" --year-from <起> --year-to <止> --release
+>    kb search --collection academic_library --kind dense "<关键词>" --partitions zh_2010s,zh_2020s --release
+>    kb release academic_library --partitions zh_2010s,zh_2020s
+>    ```
+> 3. 分区名 = `{zh|en}_{pre1980|1980s|1990s|2000s|2010s|2020s|unknown}`，共 14 个。
+>    速查：2015–2024 → `zh_2010s,zh_2020s,en_2010s,en_2020s`；2000–2009 → `zh_2000s,en_2000s`。
+> 4. 仅有 MCP 且无分区 API 时：仍不要整库加载；先用上述 CLI 命中，再用 `milvus_query` 按 `source_file`/`parent_id` 回取父块。
+> 5. `proj_*` 仍按「一次只加载一个 Collection」执行。
+> 6. 全部检索结束后释放已加载的分区/集合。
+> 7. 完整示例提示词见 `agents/partition_loading_prompts.md`。
 > ⚠️ **禁用**：`milvus_vector_search` 与 `milvus_hybrid_search` 需要外部嵌入工具生成查询向量，本环境没有，调用必然失败，一律不得使用。
 > ⚠️ **过滤**：`milvus_text_search` 不支持 `filter_expr`；需要过滤的 BM25 一律用 `milvus_text_similarity_search(..., anns_field="sparse", metric_type="BM25", filter_expr=...)`。
 

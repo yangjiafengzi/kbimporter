@@ -27,6 +27,8 @@
 
 ## academic_library 分区动态加载
 
+完整「示例提示词 + 实际使用提示词」见 **[partition_loading_prompts.md](partition_loading_prompts.md)**。
+
 | 部分 | 取值 |
 | --- | --- |
 | 语言 | `zh` / `en` |
@@ -34,7 +36,7 @@
 
 分区名 = `{lang}_{bucket}`，例如 `zh_2010s`、`en_unknown`（`year<=0`）。共 14 个分区。
 
-### 实际使用的提示词（Agent 检索 academic_library 时）
+### 实际使用提示词（Agent 检索 academic_library 时）
 
 ```bash
 # 按年份区间加载/检索（推荐）
@@ -51,20 +53,15 @@ kb release academic_library --partitions zh_2010s
 kb release academic_library
 ```
 
-### 示例提示词片段
+### 示例提示词片段（可粘贴）
 
-```markdown
-### 检索 academic_library 时必须按分区加载
+见 `partition_loading_prompts.md` 的「示例提示词」全文。要点：
 
-1. 优先使用 CLI，显式指定年代范围，检索完 `--release`：
-   kb search --collection academic_library --kind dense "<问题关键词>" --year-from <起> --year-to <止> --release
-2. 若仅有 MCP 且无分区 API：仍不要整库 `load_collection`；
-   可先用上述 CLI 命中，再用 `milvus_query` 按 `source_file`/`parent_id` 回取父块。
-3. `proj_*` / `fieldwork_kb` 仍按「一次只加载一个 Collection」执行。
-4. 全部检索结束后释放已加载的分区/集合。
-```
+1. 检索 `academic_library` **必须**按年代/分区加载，检索完 `--release`
+2. 仅有 MCP 时也不要整库 `load_collection`；CLI 命中后再用 `milvus_query` 回取父块
+3. `proj_*` / `fieldwork_kb` 仍按「一次只加载一个 Collection」执行
 
-迁移历史数据到分区（维护者，不重嵌入）：
+维护者迁移历史数据（不重嵌入）：
 
 ```bash
 kb repartition academic-library          # dry-run
