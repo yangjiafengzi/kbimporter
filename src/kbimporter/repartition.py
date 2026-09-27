@@ -169,6 +169,7 @@ def run_repartition(
         # 先校验再删 _default，失败时原件仍在，可回滚
         if migrated != total:
             raise RuntimeError(f"行数校验失败: 导出 {total}, 写入 {migrated}；未删除 _default")
+        log.info("校验通过: 导出/写入均为 %d 行（stats 的 row_count 含 tombstone，可大于此数）", total)
 
         # 只清 _default：不带 partition_name 的 "id >= 0" 会连新建分区一起删掉
         client.delete(collection_name=target, filter="id >= 0", partition_name="_default")
