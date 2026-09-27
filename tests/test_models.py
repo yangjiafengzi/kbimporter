@@ -163,6 +163,39 @@ def test_milvus_collection_crud_wrapper(cfg, monkeypatch):
     assert client.released == ["academic_library"]
 
 
+def test_collection_insert_accepts_partition_name(cfg, monkeypatch):
+    from kbimporter import models as m
+
+    calls = []
+
+    class FakeClient:
+        def insert(self, collection_name, data, **kwargs):
+            calls.append((collection_name, kwargs.get("partition_name"), data))
+            return {"ids": list(range(1, len(data) + 1))}
+
+    coll = m.MilvusCollection(FakeClient(), "academic_library")
+    ids = coll.insert([{"text": "x"}], partition_name="zh_2010s")
+    assert ids == [1]
+    assert calls[0][1] == "zh_2010s"
+
+
+def test_collection_query_accepts_partition_names(cfg, monkeypatch):
+    from kbimporter import models as m
+
+    calls = []
+
+    class FakeClient:
+        def query(self, collection_name, **kwargs):
+            calls.append(kwargs)
+            return []
+
+    coll = m.MilvusCollection(FakeClient(), "academic_library")
+    coll.query(expr="language == 'zh'", partition_names=["zh_2010s", "zh_2020s"])
+    assert calls[0]["partition_names"] == ["zh_2010s", "zh_2020s"]
+    coll.query(expr="language == 'zh'")
+    assert "partition_names" not in calls[1]
+
+
 def test_tcp_reachable(monkeypatch):
     class _Conn:
         def __enter__(self):

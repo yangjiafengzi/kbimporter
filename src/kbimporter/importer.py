@@ -14,6 +14,7 @@ from kbimporter.models import (
     ensure_fieldwork_kb,
     ensure_project_collection,
 )
+from kbimporter.partition import academic_partition_name
 from kbimporter.scanner import (
     classify_file,
     detect_language,
@@ -92,19 +93,21 @@ def _delete_old_vectors(coll_name: str, source_file: str, cfg: Config):
     coll.delete(f"source_file == '{escaped}'")
 
 
-def _batch_insert(coll, rows: list[dict], cfg: Config) -> list[int]:
+def _batch_insert(coll, rows: list[dict], cfg: Config,
+                  partition_name: str = "") -> list[int]:
     all_ids: list[int] = []
     batch_size = cfg.milvus.batch_size
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i + batch_size]
-        all_ids.extend(coll.insert(batch))
+        all_ids.extend(coll.insert(batch, partition_name=partition_name))
     return all_ids
 
 
 def _insert_coarse_then_fine(coll, coarse_chunks: list[str],
                              fine_chunks: list[str], parent_indices: list[int],
                              base_fields: dict, cfg: Config,
-                             log: logging.Logger) -> int:
+                             log: logging.Logger,
+                             partition_name: str = "") -> int:
     now = int(time.time())
     source_file = base_fields["source_file"]
     extra_keys = base_fields.get("extra_keys", {})
@@ -121,7 +124,7 @@ def _insert_coarse_then_fine(coll, coarse_chunks: list[str],
         }
         row.update(extra_keys)
         coarse_rows.append(row)
-    coarse_ids = _batch_insert(coll, coarse_rows, cfg)
+    coarse_ids = _batch_insert(coll, coarse_rows, cfg, partition_name=partition_name)
     log.info(f"    粗块已插入: {len(coarse_ids)} 条")
 
     if not fine_chunks:
@@ -139,7 +142,7 @@ def _insert_coarse_then_fine(coll, coarse_chunks: list[str],
         }
         row.update(extra_keys)
         fine_rows.append(row)
-    fine_ids = _batch_insert(coll, fine_rows, cfg)
+    fine_ids = _batch_insert(coll, fine_rows, cfg, partition_name=partition_name)
     log.info(f"    细块已插入: {len(fine_ids)} 条")
     return len(coarse_ids) + len(fine_ids)
 
@@ -152,6 +155,7 @@ def process_academic(fp: Path, text: str, info: dict, cfg: Config,
     if not coarse:
         return 0
     lang = detect_language(fp.name)
+    part = academic_partition_name(lang, int(info.get("year") or 0))
     base = {
         "source_file": fp.relative_to(cfg.require_kb_root()).as_posix(),
         "extra_keys": {
@@ -161,8 +165,9 @@ def process_academic(fp: Path, text: str, info: dict, cfg: Config,
             "title": info.get("title", ""),
         },
     }
-    log.info(f"    切片完成: {len(coarse)} 粗块 + {len(fine)} 细块 (语言: {lang})")
-    return _insert_coarse_then_fine(coll, coarse, fine, parent_idx, base, cfg, log)
+    log.info(f"    切片完成: {len(coarse)} 粗块 + {len(fine)} 细块 (语言: {lang}, 分区: {part})")
+    return _insert_coarse_then_fine(coll, coarse, fine, parent_idx, base, cfg, log,
+                                    partition_name=part)
 
 
 def process_project(fp: Path, text: str, info: dict, cfg: Config,

@@ -81,8 +81,12 @@ class MilvusCollection:
     def release(self):
         self._client.release_collection(collection_name=self.name)
 
-    def insert(self, rows: list[dict]) -> list[int]:
-        result = self._client.insert(collection_name=self.name, data=rows)
+    def insert(self, rows: list[dict], partition_name: str = "") -> list[int]:
+        result = self._client.insert(
+            collection_name=self.name,
+            data=rows,
+            partition_name=partition_name or "",
+        )
         ids = result.get("ids", []) if isinstance(result, dict) else []
         return [int(i) for i in ids]
 
@@ -94,7 +98,10 @@ class MilvusCollection:
         self._client.upsert(collection_name=self.name, data=rows, **kwargs)
 
     def query(self, expr: str = "", output_fields: list[str] | None = None,
-              limit: int | None = None, **kwargs):
+              limit: int | None = None, partition_names: list[str] | None = None,
+              **kwargs):
+        if partition_names:
+            kwargs["partition_names"] = partition_names
         return self._client.query(
             collection_name=self.name,
             filter=expr,

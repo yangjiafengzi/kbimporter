@@ -23,7 +23,7 @@ class FakeColl:
     def load(self):
         pass
 
-    def insert(self, rows):
+    def insert(self, rows, partition_name=""):
         start = len(self.inserted) + 1
         self.inserted.extend(rows)
         return list(range(start, start + len(rows)))
@@ -110,6 +110,36 @@ def test_import_dry_run_is_read_only(cfg: Config, fake_milvus, monkeypatch):
     assert stats["new"] == 2
     assert not cfg.state_db.exists()
     assert fake_milvus == {}
+
+
+def test_process_academic_routes_partition(cfg, fake_milvus, monkeypatch):
+    from kbimporter import importer
+
+    inserted = []
+
+    class FakeColl:
+        def load(self):
+            pass
+
+        def insert(self, rows, partition_name=""):
+            inserted.extend([(partition_name, r) for r in rows])
+            start = len(inserted)
+            return list(range(start - len(rows) + 1, start + 1))
+
+    monkeypatch.setattr(importer, "_get_collection", lambda *a, **k: FakeColl())
+    monkeypatch.setattr(importer, "ensure_academic_library", lambda *a, **k: None)
+    monkeypatch.setattr(importer, "chunk_document",
+                        lambda text, cfg: (["粗块内容"], ["细块内容"], [0]))
+
+    n = importer.process_academic(
+        cfg.library_dir / "张三 - 2015 - 测试.md",
+        "正文",
+        {"author": "张三", "year": 2015, "title": "测试"},
+        cfg,
+        __import__("logging").getLogger("t"),
+    )
+    assert n == 2
+    assert all(p == "zh_2010s" for p, _ in inserted)
 
 
 def test_source_rel_path_cross_platform():
