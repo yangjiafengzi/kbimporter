@@ -20,6 +20,7 @@ GitHub: [yangjiafengzi/kbimporter](https://github.com/yangjiafengzi/kbimporter)
 - 田野调查笔记：按项目组织访谈/观察笔记，自动提取 `_项目信息.md` 中的地点、时间、人员等元数据。
 - RAG / Agent 检索：Milvus 稠密向量（DashScope 嵌入）+ 稀疏向量（BM25）双路召回。
 - 中文社科研究：文件名、目录名、切片与检索全部面向中文场景设计。
+- 大库省内存检索：`academic_library` 按语言×年代分区，按需加载所需年代即可。
 
 ## 数据库设计思想
 
@@ -59,6 +60,43 @@ parent_id, vector, sparse, created_at
 
 - `source_file` 是增量更新与删除的唯一锚点，按“相对知识库根目录”保存。
 - `granularity = coarse / fine` 区分两层切片；`parent_id` 把细块挂到所属粗块。
+
+### 语言×年代分区（academic_library）
+
+`academic_library` 按 **语言 × 年代** 做手工分区，支持按需加载，避免把约 77 万行
+全部载入内存。项目库 / 田野库不分区，仍整库加载。
+
+| 部分 | 取值 |
+| --- | --- |
+| 语言 | `zh` / `en` |
+| 年代 | `pre1980` / `1980s` / `1990s` / `2000s` / `2010s` / `2020s` / `unknown` |
+
+分区名 = `{lang}_{bucket}`，例如 `zh_2010s`、`en_unknown`（`year<=0`）。共 14 个分区；
+`year ≥ 2030` 记入 `2020s`。
+
+- **新导入自动归档**：`kb import` 按文件名解析的 `language + year` 写入对应分区，
+  分区不存在时自动创建。
+- **检索按需加载**：
+
+  ```bash
+  # 按年份区间（推荐；结束加 --release 释放内存）
+  kb search --collection academic_library --kind dense "关键词" --year-from 2015 --year-to 2024 --release
+
+  # 直接点名分区
+  kb search --collection academic_library --kind bm25 "关键词" --partitions zh_2010s,zh_2020s --release
+
+  # 只卸载部分分区
+  kb release academic_library --partitions zh_2010s,zh_2020s
+  ```
+
+  不带 `--partitions` / `--year-*` 时仍整库加载（兼容旧行为）。日常检索请带上年代
+  范围，尤其是 Agent 场景。
+- **历史数据迁移**（向量保真，**不**重新嵌入、0 费用）：
+
+  ```bash
+  kb repartition academic-library           # dry-run
+  kb repartition academic-library --execute
+  ```
 
 ### 文件名即元数据
 
@@ -209,10 +247,10 @@ docker run -d --name milvus --security-opt seccomp:unconfined `
 
 ```bash
 # 核心：向量化导入 + Zotero 同步 + 去重（体积小，任何用法都需要）
-pip install "kbimporter-0.5.0-py3-none-any.whl[import,sync,dedupe]"
+pip install "kbimporter-0.6.0-py3-none-any.whl[import,sync,dedupe]"
 # 之后按 OCR 方案补装：
-pip install "kbimporter-0.5.0-py3-none-any.whl[ocr]"       # 本地引擎（Marker/MarkItDown，较重）
-pip install "kbimporter-0.5.0-py3-none-any.whl[cloud]"     # 云端 OCR（PaddleOCR/MinerU/百度/OpenAI）
+pip install "kbimporter-0.6.0-py3-none-any.whl[ocr]"       # 本地引擎（Marker/MarkItDown，较重）
+pip install "kbimporter-0.6.0-py3-none-any.whl[cloud]"     # 云端 OCR（PaddleOCR/MinerU/百度/OpenAI）
 ```
 
 发行包本身不捆绑第三方依赖，extras 按需安装：`[import]`（向量化）、`[sync]`（Zotero
@@ -336,7 +374,8 @@ kb convert --dry-run           # 预演转换，查看需要 OCR 的文件
 kb convert                     # 文档 -> Markdown（同名 MD 已存在则跳过）
 kb import --dry-run            # 预演向量化导入（只读）
 kb import                      # 真正写状态库 + Milvus（首次执行前请确认）
-kb search --collection academic_library --kind dense "你的问题"
+# 学术库检索按年代分区加载，避免整库进内存
+kb search --collection academic_library --kind dense "你的问题" --year-from 2015 --year-to 2024 --release
 ```
 
 ### 1. 建立 Zotero 文献库（学术文献）
@@ -370,9 +409,11 @@ kb search --collection academic_library --kind dense "你的问题"
    kb import --dry-run
    kb import
    ```
-   文件进入 `academic_library` 集合，文件名自动解析出 `author / year / title`。
+   文件进入 `academic_library` 集合，文件名自动解析出 `author / year / title`，
+   并按 `language + year` 自动写入对应分区（如 `zh_2010s`）。
 6. 以后新增文献时，只需对新文献重复第 2 步（命名）和第 3~5 步；程序是增量的，
-   未变化的文件不会重复处理。
+   未变化的文件不会重复处理。检索时用 `--year-from/--year-to` 或 `--partitions`
+   只加载所需年代分区（见上文“语言×年代分区”）。
 
 ### 2. 建立项目文献库（Zotero 筛选 + 手动复制）
 
@@ -475,9 +516,11 @@ kb search --collection academic_library --kind dense "你的问题"
    这两个文件就是现成的 Agent 范例，来自 KB-Vectorize。
 4. 对话时选择已启用该 MCP 的模型。Agent 会按提示词调用 Milvus MCP 的检索工具，
    访问 `academic_library` / `proj_*` / `fieldwork_kb` 集合。
+   `academic_library` 已分区：提示词要求按年代加载，禁止整库 `load_collection`；
+   完整「示例提示词 + 实际使用提示词」见 `agents/partition_loading_prompts.md`。
 5. 如果暂时没有可用的 Milvus MCP，也可以把 `kb search --collection <集合> --kind
-   dense|bm25|query <词>` 的用法写进系统提示词，让 Agent 通过命令行完成同样的检索
-   （见 `agents/README.md`）。
+   dense|bm25|query <词> [--year-from Y --year-to Y]` 的用法写进系统提示词，让 Agent
+   通过命令行完成同样的检索（见 `agents/README.md`）。
 
 > Cherry Studio 的 MCP 安装方式随版本略有差异，以软件内“MCP 服务器”面板提示为准。
 > `mcp-server-milvus` 持续迭代，建议始终从官方仓库获取最新版；如遇到兼容问题，
