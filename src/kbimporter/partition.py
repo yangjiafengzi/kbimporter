@@ -17,6 +17,8 @@ def year_bucket(year: int) -> str:
         return "unknown"
     if y < 1980:
         return "pre1980"
+    if y >= 2030:
+        return "2020s"
     return f"{(y // 10) * 10}s"
 
 

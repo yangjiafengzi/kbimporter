@@ -16,6 +16,8 @@ def test_year_bucket_edges():
     assert year_bucket(2005) == "2000s"
     assert year_bucket(2015) == "2010s"
     assert year_bucket(2024) == "2020s"
+    assert year_bucket(2030) == "2020s"
+    assert year_bucket(2099) == "2020s"
 
 
 def test_normalize_lang():
@@ -45,3 +47,12 @@ def test_partitions_for_year_range():
         "zh_2010s", "zh_2020s",
     ]
     assert partitions_for_year_range(None, None) == ACADEMIC_PARTITIONS
+
+
+def test_year_bucket_stays_in_closed_set():
+    from kbimporter.partition import _BUCKETS
+    for y in range(-5, 5001):
+        assert year_bucket(y) in _BUCKETS
+        name = academic_partition_name("zh", y)
+        assert name in ACADEMIC_PARTITIONS
+        assert academic_partition_name("en", y) in ACADEMIC_PARTITIONS
