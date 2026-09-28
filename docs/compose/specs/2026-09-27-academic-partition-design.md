@@ -2,7 +2,7 @@
 
 ## [S1] 问题
 
-`academic_library` 创建时未设分区，822,667 行全在 `_default`。检索必须整库 `load_collection`，内存压力大。需要分区动态加载，且**不得**触发无谓的 DashScope 重嵌入费用。
+`academic_library` 创建时未设分区，全量数据都在 `_default`。检索必须整库 `load_collection`，内存压力大。需要分区动态加载，且**不得**触发无谓的 DashScope 重嵌入费用。
 
 ## [S2] 约束（已验证，Milvus 2.6.14）
 
@@ -16,7 +16,7 @@
 
 在**原** `academic_library` 上做手工分区 + 向量保真搬运（不删库、不重嵌、可回滚）。
 
-分区名：`{lang}_{bucket}`，`lang∈{zh,en}`，`bucket∈{pre1980,1980s,1990s,2000s,2010s,2020s,unknown}`（`year<=0` → `unknown`）。共 14 个分区。
+分区名：`{lang}_{bucket}`，`lang∈{zh,en}`，`bucket∈{pre1980,1980s,1990s,2000s,2010s,2020s,2030s,2040s,2050s,unknown}`（`year<=0` → `unknown`）。共 20 个分区。
 
 ## [S4] 迁移命令 `kb repartition academic-library`
 

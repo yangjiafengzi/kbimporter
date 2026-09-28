@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use compose:subagent (recommended) or compose:execute to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 为 `academic_library` 增加“语言×年代”手工分区，支持 `load_partitions` 动态加载，并用向量保真迁移把已有 82 万行搬进分区（零 DashScope 重嵌入）。
+**Goal:** 为 `academic_library` 增加“语言×年代”手工分区，支持 `load_partitions` 动态加载，并用向量保真迁移把已有数据搬进分区（零 DashScope 重嵌入）。
 
 **Architecture:** 在原集合上 `create_partition` + 临时 `drop_collection_function(text_dense_emb)` + 导出/写回 dense 向量 + 重映射 `parent_id` + 恢复 Function。导入按 `language+year` 路由分区；检索用 `--partitions` / `--year-from/to` 只加载子集。
 
@@ -530,7 +530,7 @@ def run_repartition(
         log.error("集合不存在: %s", collection)
         return 2
 
-    # 1) 全量读入并分组（内存：82 万行标量 + 1024 维向量约数 GB，生产应按批；
+    # 1) 全量读入并分组（大数据量会占用较多内存，生产应按批；
     #    先按批收集到分区桶，coarse/fine 分离）
     coarse_by_part: dict[str, list[dict]] = defaultdict(list)
     fine_all: list[dict] = []

@@ -63,16 +63,16 @@ parent_id, vector, sparse, created_at
 
 ### 语言×年代分区（academic_library）
 
-`academic_library` 按 **语言 × 年代** 做手工分区，支持按需加载，避免把约 77 万行
+`academic_library` 按 **语言 × 年代** 做手工分区，支持按需加载，避免整库数据
 全部载入内存。项目库 / 田野库不分区，仍整库加载。
 
 | 部分 | 取值 |
 | --- | --- |
 | 语言 | `zh` / `en` |
-| 年代 | `pre1980` / `1980s` / `1990s` / `2000s` / `2010s` / `2020s` / `unknown` |
+| 年代 | `pre1980` / `1980s` / `1990s` / `2000s` / `2010s` / `2020s` / `2030s` / `2040s` / `2050s` / `unknown` |
 
-分区名 = `{lang}_{bucket}`，例如 `zh_2010s`、`en_unknown`（`year<=0`）。共 14 个分区；
-`year ≥ 2030` 记入 `2020s`。
+分区名 = `{lang}_{bucket}`，例如 `zh_2010s`、`en_unknown`（`year<=0`）。共 20 个分区；
+`year ≥ 2060` 记入 `2050s`。
 
 - **新导入自动归档**：`kb import` 按文件名解析的 `language + year` 写入对应分区，
   分区不存在时自动创建。

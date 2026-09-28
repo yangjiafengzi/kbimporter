@@ -47,7 +47,7 @@ src/kbimporter/
 `source_file` 是增量更新/删除的唯一锚点（相对知识库根）。
 `_项目信息.md` 不切片，只解析为田野元数据，改动后 upsert 该项目全部记录。
 
-`academic_library` 另有**语言×年代手工分区**（`{zh|en}_{pre1980|1980s|…|2020s|unknown}`，14 个）。
+`academic_library` 另有**语言×年代手工分区**（`{zh|en}_{pre1980|1980s|…|2050s|unknown}`，20 个）。
 检索应用 `--year-from/to` 或 `--partitions` 只 `load_partitions`，禁止无脑整库 `load_collection`。
 历史数据用 `kb repartition academic-library`（默认 dry-run，`--execute` 执行）向量保真搬迁，**0 次嵌入调用**。
 Agent 提示词模板（示例 + 实际使用）见 [agents/partition_loading_prompts.md](agents/partition_loading_prompts.md)。

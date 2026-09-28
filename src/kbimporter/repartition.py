@@ -18,7 +18,7 @@ _EXPORT_FIELDS = [
 def plan_moves(rows: list[dict]) -> dict[str, list[dict]]:
     groups: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
-        # 不 int(year)：year_bucket 已安全兜底（坏年份 → unknown）
+        # 不 int(year)：year_bucket 内部安全兜底，坏年份 → unknown
         name = academic_partition_name(r.get("language"), r.get("year") or 0)
         groups[name].append(r)
     return dict(groups)
@@ -66,9 +66,7 @@ def _insert_without_id(client, collection_name: str, part: str, rows: list[dict]
         )
         new_ids = res.get("ids", []) if isinstance(res, dict) else []
         if len(new_ids) != len(batch):
-            raise RuntimeError(
-                f"insert 返回 id 数量不符: {len(new_ids)} != {len(batch)}"
-            )
+            raise RuntimeError(f"insert 返回 id 数量不符: {len(new_ids)} != {len(batch)}")
         pairs.extend((old.get("id"), new) for old, new in zip(batch, new_ids))
     return pairs
 
@@ -108,23 +106,19 @@ def run_repartition(
         return 2
     client.load_collection(collection_name=target)
 
-    coarse_by_part: dict[str, list[dict]] = defaultdict(list)
-    fine_by_part: dict[str, list[dict]] = defaultdict(list)
-    total = 0
-    for row in _iter_rows(client, target, batch_size):
-        total += 1
-        # 不 int(year)：year_bucket 已安全兜底（坏年份 → unknown）
-        part = academic_partition_name(row.get("language"), row.get("year") or 0)
-        if row.get("granularity") == "coarse":
-            coarse_by_part[part].append(row)
-        else:
-            fine_by_part[part].append(row)
-        if total % 10000 == 0:
-            log.info("  已扫描 %d 行…", total)
+    rows = list(_iter_rows(client, target, batch_size))
+    total = len(rows)
+    groups = plan_moves(rows)
+    coarse_by_part = {
+        p: [r for r in rs if r.get("granularity") == "coarse"] for p, rs in groups.items()
+    }
+    fine_by_part = {
+        p: [r for r in rs if r.get("granularity") != "coarse"] for p, rs in groups.items()
+    }
 
     stats = client.get_collection_stats(collection_name=target) or {}
     log.info("扫描完成: %d 行（stats row_count=%s）", total, stats.get("row_count"))
-    parts_seen = sorted(set(coarse_by_part) | set(fine_by_part))
+    parts_seen = sorted(groups)
     log.info("目标分区: %s", ", ".join(parts_seen) or "(none)")
     for part in parts_seen:
         log.info(
@@ -166,10 +160,10 @@ def run_repartition(
         if parts_seen:
             client.load_partitions(collection_name=target, partition_names=parts_seen)
 
-        # 先校验再删 _default，失败时原件仍在，可回滚
+        # 先校验再删 _default：失败时旧数据仍在，可回滚
         if migrated != total:
-            raise RuntimeError(f"行数校验失败: 导出 {total}, 写入 {migrated}；未删除 _default")
-        log.info("校验通过: 导出/写入均为 %d 行（stats 的 row_count 含 tombstone，可大于此数）", total)
+            raise RuntimeError(f"行数校验失败: 导出 {total}, 写入 {migrated}")
+        log.info("校验通过: 导出/写入均为 %d 行", total)
 
         # 只清 _default：不带 partition_name 的 "id >= 0" 会连新建分区一起删掉
         client.delete(collection_name=target, filter="id >= 0", partition_name="_default")

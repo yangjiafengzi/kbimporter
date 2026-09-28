@@ -124,7 +124,7 @@
 
 > ⚠️ **检索前**：若 Collection 未加载，先调用 `milvus_load_collection(collection_name=...)`。
 > ⚠️ **内存管理（academic_library 已分区，必须遵守）**：
-> 1. 检索 `academic_library` **必须**按年代/分区加载，**禁止整库 `load_collection`**（约 77 万行会撑爆内存）。
+> 1. 检索 `academic_library` **必须**按年代/分区加载，**禁止整库 `load_collection`**（大数据量会占满内存）。
 > 2. **实际使用提示词**（从问题推断年代后执行，结束加 `--release`）：
 >    ```bash
 >    kb search --collection academic_library --kind dense "<关键词>" --year-from <起> --year-to <止> [--lang zh|en] --release
@@ -132,7 +132,7 @@
 >    kb search --collection academic_library --kind dense "<关键词>" --partitions zh_2010s,zh_2020s --release
 >    kb release academic_library --partitions zh_2010s,zh_2020s
 >    ```
-> 3. 分区名 = `{zh|en}_{pre1980|1980s|1990s|2000s|2010s|2020s|unknown}`，共 14 个。
+> 3. 分区名 = `{zh|en}_{pre1980|1980s|1990s|2000s|2010s|2020s|2030s|2040s|2050s|unknown}`，共 20 个。
 >    速查：2015–2024 → `zh_2010s,zh_2020s,en_2010s,en_2020s`；2000–2009 → `zh_2000s,en_2000s`。
 > 4. 仅有 MCP 且无分区 API 时：仍不要整库加载；先用上述 CLI 命中，再用 `milvus_query` 按 `source_file`/`parent_id` 回取父块。
 > 5. `proj_*` 仍按「一次只加载一个 Collection」执行。
@@ -228,7 +228,7 @@ Step 0.2: academic_library 按年代分区加载（禁止整库 load_collection�
           kb search --collection academic_library --kind dense "<主题词>" \
             --year-from <根据问题推断的起始年> --year-to <结束年> --release
           # 或 --partitions zh_2010s,en_2010s,zh_2020s,en_2020s
-          # 分区名: {zh|en}_{pre1980|1980s|1990s|2000s|2010s|2020s|unknown}
+          # 分区名: {zh|en}_{pre1980|1980s|1990s|2000s|2010s|2020s|2030s|2040s|2050s|unknown}
 Step 0.3: 对每个可用的 proj_* Collection，逐一加载：
           milvus_load_collection(collection_name="<proj_xxx>")
 Step 0.4: 对每个 proj_* Collection，调用 milvus_get_collection_info

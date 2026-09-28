@@ -16,8 +16,11 @@ def test_year_bucket_edges():
     assert year_bucket(2005) == "2000s"
     assert year_bucket(2015) == "2010s"
     assert year_bucket(2024) == "2020s"
-    assert year_bucket(2030) == "2020s"
-    assert year_bucket(2099) == "2020s"
+    assert year_bucket(2035) == "2030s"
+    assert year_bucket(2045) == "2040s"
+    assert year_bucket(2055) == "2050s"
+    assert year_bucket(2060) == "2050s"
+    assert year_bucket(2099) == "2050s"
 
 
 def test_normalize_lang():
@@ -31,12 +34,14 @@ def test_academic_partition_name():
     assert academic_partition_name("zh", 2015) == "zh_2010s"
     assert academic_partition_name("en", 0) == "en_unknown"
     assert academic_partition_name("EN", 1991) == "en_1990s"
+    assert academic_partition_name("zh", 2035) == "zh_2030s"
 
 
 def test_all_partitions_unique_and_cover_languages():
-    assert len(ACADEMIC_PARTITIONS) == 14
+    assert len(ACADEMIC_PARTITIONS) == 20
     assert "zh_2010s" in ACADEMIC_PARTITIONS
     assert "en_unknown" in ACADEMIC_PARTITIONS
+    assert "zh_2050s" in ACADEMIC_PARTITIONS
 
 
 def test_partitions_for_year_range():
@@ -49,9 +54,12 @@ def test_partitions_for_year_range():
     assert partitions_for_year_range(None, None) == ACADEMIC_PARTITIONS
 
 
-def test_partitions_for_year_range_includes_open_ended_2020s():
-    assert partitions_for_year_range(2030, 2040) == ["en_2020s", "zh_2020s"]
-    assert "zh_2020s" in partitions_for_year_range(2025, 2035)
+def test_partitions_for_year_range_includes_open_ended_2050s():
+    assert partitions_for_year_range(2060, 2070) == ["en_2050s", "zh_2050s"]
+    assert "zh_2050s" in partitions_for_year_range(2055, 2065)
+    assert partitions_for_year_range(2030, 2040) == [
+        "en_2030s", "en_2040s", "zh_2030s", "zh_2040s",
+    ]
 
 
 def test_year_bucket_stays_in_closed_set():

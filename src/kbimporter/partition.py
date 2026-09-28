@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 _LANGS = ("zh", "en")
-_BUCKETS = ("pre1980", "1980s", "1990s", "2000s", "2010s", "2020s", "unknown")
+_BUCKETS = (
+    "pre1980", "1980s", "1990s", "2000s", "2010s",
+    "2020s", "2030s", "2040s", "2050s", "unknown",
+)
 
 ACADEMIC_PARTITIONS: list[str] = sorted(
     f"{lang}_{b}" for b in _BUCKETS for lang in _LANGS
@@ -17,8 +20,8 @@ def year_bucket(year: int) -> str:
         return "unknown"
     if y < 1980:
         return "pre1980"
-    if y >= 2030:
-        return "2020s"
+    if y >= 2060:
+        return "2050s"
     return f"{(y // 10) * 10}s"
 
 
@@ -49,8 +52,8 @@ def partitions_for_year_range(
                 continue
             if b == "pre1980":
                 start, end = 0, 1979
-            elif b == "2020s":
-                start, end = 2020, 10**9  # open-ended: year_bucket clamps ≥2030 here
+            elif b == "2050s":
+                start, end = 2050, 10**9  # open-ended: year_bucket clamps ≥2060 here
             else:
                 start = int(b[:4])
                 end = start + 9
